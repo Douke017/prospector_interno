@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+env/
+venv/
+*.egg-info/
+dist/
+build/
+
+# Testing & Cache
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local data & dumps (Do not commit large dumps or temp downloads)
+backup_10.0.0.12
+*.sql
+*.tmp*
+data/
+bronze/
+silver/
+gold/
+*.dat
+
+# IDE
+.vscode/
+.idea/
+*.swp
