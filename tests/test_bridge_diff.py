@@ -87,3 +87,72 @@ def test_compute_diff_classifies_confirmed_when_in_storage(
     )
     assert confirmed_item is not None
     assert confirmed_item.category == ResourceChangeCategory.CONFIRMED
+
+
+def test_compute_diff_with_supervisor_canonical_bcb_csv(
+    diff_engine: DuckDBDiffEngine,
+) -> None:
+    """Verifica que DuckDB procese el CSV canónico entregado por el supervisor."""
+    base_dir = Path("/home/douke017/Datax/archivos_prospector_interno")
+    candidate_paths = [
+        Path("../archivos_prospector_interno/bcb_mapa_interno_canonico_v1.csv"),
+        Path("archivos_prospector_interno/bcb_mapa_interno_canonico_v1.csv"),
+        base_dir / "bcb_mapa_interno_canonico_v1.csv",
+    ]
+    target_csv = next((p for p in candidate_paths if p.exists()), None)
+    assert target_csv is not None
+
+    report = diff_engine.compute_diff(
+        source_id="bcb",
+        external_map_path=target_csv,
+    )
+
+    assert report.source_id == "bcb"
+    assert report.total_external_resources == 164
+    assert len(report.items) == 164
+    assert all("bcb.gob.bo" in item.url for item in report.items)
+
+
+def test_compute_diff_via_rest_client(
+    bronze_storage: LocalBronzeStorage,
+) -> None:
+    """Verifica que DuckDBDiffEngine concilie vía REST sin ruta de archivo."""
+    from unittest.mock import create_autospec
+    from prospector_interno.domain.models import DiscoveredResourceItem
+    from prospector_interno.domain.ports import ExternalCatalogClientPort
+
+    mock_client = create_autospec(ExternalCatalogClientPort)
+    mock_client.fetch_resources.return_value = [
+        DiscoveredResourceItem(
+            resource_key="res_01",
+            url="https://www.bbv.com.bo/doc1.pdf",
+            source_id="bbv",
+            title="Doc 1",
+            file_extension=".pdf",
+            period_label="2026-02",
+        ),
+        DiscoveredResourceItem(
+            resource_key="res_02",
+            url="https://www.bbv.com.bo/doc2.pdf",
+            source_id="bbv",
+            title="Doc 2",
+            file_extension=".pdf",
+            period_label="2026-03",
+        ),
+    ]
+    mock_client.get_latest_run_id.return_value = "run_mock_remote_99"
+
+    engine = DuckDBDiffEngine(
+        storage=bronze_storage,
+        external_client=mock_client,
+    )
+    report = engine.compute_diff(source_id="bbv")
+
+    assert report.source_id == "bbv"
+    assert report.run_id == "run_mock_remote_99"
+    assert report.total_external_resources == 2
+    assert report.total_new == 2
+    assert report.total_confirmed == 0
+    mock_client.fetch_resources.assert_called_once_with(
+        source_id="bbv", base_url=None
+    )

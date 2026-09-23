@@ -89,6 +89,14 @@ class ExternalMapCorruptError(ReconciliationError):
     """Lanzada cuando el formato del mapa JSON no cumple la especificación."""
 
 
+class ExternalCatalogConnectionError(ReconciliationError):
+    """Fallo de conectividad o timeout con la Catalog API del Prospector Externo."""
+
+
+class ExternalCatalogResponseError(ReconciliationError):
+    """Respuesta HTTP inesperada o inválida devuelta por el Prospector Externo."""
+
+
 class SyncPlanError(ProspectorError):
     """Errores en la generación o validación del plan de sincronización."""
 

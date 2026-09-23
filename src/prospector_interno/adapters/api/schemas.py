@@ -57,15 +57,35 @@ class CatalogStatsResponse(BaseModel):
 class IngestionEvaluateRequest(BaseModel):
     """Solicitud enviada por Portal Nexus para verificar disponibilidad."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, populate_by_name=True)
 
-    dataset_code: str = Field(..., examples=["DS_BO_BCB_INFLATION"])
-    domain: str = Field(..., examples=["bcb.gob.bo"])
-    target_url: str = Field(
+    dataset_code: str = Field(
         ...,
-        examples=["https://www.bcb.gob.bo/datos/inflacion.xlsx"],
+        alias="dataset_id",
+        examples=["DS_BO_BCB_INFLATION"],
+        description="Código o identificador canónico del dataset",
     )
-    period: str = Field(..., examples=["2026-08"])
+    domain: str | None = Field(
+        default=None,
+        examples=["bcb.gob.bo"],
+        description="Dominio del portal emisor",
+    )
+    target_url: str | None = Field(
+        default=None,
+        examples=["https://www.bcb.gob.bo/datos/inflacion.xlsx"],
+        description="URL directa hacia el recurso",
+    )
+    period: str = Field(
+        ...,
+        alias="temporal_period",
+        examples=["2026-08"],
+        description="Período temporal del recurso (ej: 2026-05)",
+    )
+    source_id: str | None = Field(
+        default=None,
+        examples=["ine"],
+        description="Identificador opcional de la institución emisor",
+    )
     force_refresh: bool = Field(default=False)
     request_id: str | None = Field(default=None)
 
@@ -133,11 +153,23 @@ class BridgeReconcileRequest(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    source_id: str = Field(..., examples=["finrural"])
-    external_map_path: str = Field(
-        ...,
+    source_id: str = Field(..., examples=["bbv", "finrural"])
+    external_api_url: str | None = Field(
+        default=None,
+        examples=["http://localhost:8000"],
+        description=(
+            "URL base de la Catalog API Facade del Prospector Externo. "
+            "Si se omite, se utiliza el valor configurado en PROSPECTOR_EXTERNO_URL."
+        ),
+    )
+    external_map_path: str | None = Field(
+        default=None,
         examples=["prospector_externo/output/finrural/mapa_finrural.json"],
-        description="Ruta relativa o absoluta al mapa JSON del Externo",
+        description=(
+            "Ruta opcional al archivo local para pruebas offline o "
+            "mapas CSV canónicos. Si no se especifica, la conciliación "
+            "se realiza vía HTTP REST."
+        ),
     )
 
 
@@ -158,18 +190,32 @@ class BridgeReconcileResponse(BaseModel):
 class BridgeSyncRequest(BaseModel):
     """Petición para generar y ejecutar el SyncPlan hacia Bronze (HUI-19)."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, populate_by_name=True)
 
-    source_id: str = Field(..., examples=["finrural"])
-    external_map_path: str = Field(
-        ...,
+    source_id: str = Field(..., examples=["bbv", "finrural"])
+    external_api_url: str | None = Field(
+        default=None,
+        examples=["http://localhost:8000"],
+        description="URL base de la Catalog API Facade del Prospector Externo.",
+    )
+    external_map_path: str | None = Field(
+        default=None,
         examples=["prospector_externo/output/finrural/mapa_finrural.json"],
+        description="Ruta opcional para pruebas offline o mapas CSV canónicos.",
     )
     max_downloads: int = Field(
         default=10,
         ge=1,
-        le=50,
-        description="Límite máximo de descargas a procesar en esta ejecución",
+        le=1000,
+        alias="batch_size",
+        description="Límite máximo de descargas a procesar en esta tanda",
+    )
+    execute_downloads: bool = Field(
+        default=True,
+        description=(
+            "Si es True, ejecuta la descarga hacia Bronze. "
+            "Si es False, sólo genera y previsualiza el SyncPlan (dry-run)."
+        ),
     )
 
 

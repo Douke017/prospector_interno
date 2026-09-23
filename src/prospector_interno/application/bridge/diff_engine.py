@@ -7,6 +7,7 @@ y almacenamiento local del Prospector Interno a velocidad vectorizada.
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 import duckdb
 
 from prospector_interno.domain.exceptions import (
@@ -19,8 +20,12 @@ from prospector_interno.domain.models import (
     ReconciliationDiffReportItem,
     ResourceChangeCategory,
 )
+from prospector_interno.adapters.external.rest_prospector_client import (
+    HttpExternalCatalogClient,
+)
 from prospector_interno.domain.ports import (
     BronzeStoragePort,
+    ExternalCatalogClientPort,
     ReconciliationEnginePort,
 )
 
@@ -28,16 +33,69 @@ from prospector_interno.domain.ports import (
 class DuckDBDiffEngine(ReconciliationEnginePort):
     """Motor de cálculo de discrepancias entre inventario externo y local."""
 
-    def __init__(self, storage: BronzeStoragePort) -> None:
+    def __init__(
+        self,
+        storage: BronzeStoragePort,
+        external_client: ExternalCatalogClientPort | None = None,
+    ) -> None:
         self._storage = storage
+        self._external_client = external_client or HttpExternalCatalogClient()
 
     def _extract_resources_with_duckdb(
         self,
         path: Path,
+        source_filter: str | None = None,
     ) -> tuple[str, str, list[DiscoveredResourceItem]]:
         """Extrae de forma transparente recursos de mapas compactos o completos."""
         con = duckdb.connect(":memory:")
-        posix_path = path.as_posix()
+        posix_path = path.resolve().as_posix()
+
+        # Soporte nativo para mapas canónicos en CSV (entregados por el supervisor)
+        if path.suffix.lower() == ".csv":
+            try:
+                where_clause = "WHERE main_url IS NOT NULL AND main_url != ''"
+                if source_filter:
+                    where_clause += f" AND main_url ILIKE '%{source_filter}%'"
+
+                csv_query = f"""
+                    SELECT
+                        COALESCE(report_code, file_code) AS resource_key,
+                        main_url AS url,
+                        file_name AS title,
+                        CAST(file_updated_to AS VARCHAR) AS period_label,
+                        relacion_fabrica_vieja
+                    FROM read_csv_auto('{posix_path}')
+                    {where_clause}
+                """
+                rows = con.execute(csv_query).fetchall()
+                if rows:
+                    source_id = source_filter or path.stem.split("_")[0].lower()
+                    run_id = "canonico_supervisor_v1"
+                    items: list[DiscoveredResourceItem] = []
+                    for row in rows:
+                        key, url, title, period, rel = row
+                        raw_ext = Path(str(url)).suffix
+                        ext = raw_ext if raw_ext else ".xlsx"
+                        items.append(
+                            DiscoveredResourceItem(
+                                resource_key=str(key),
+                                url=str(url),
+                                source_id=source_id,
+                                title=str(title or key),
+                                file_extension=ext,
+                                period_label=str(period) if period else None,
+                                change_status=(
+                                    "CONFIRMED"
+                                    if rel == "ANTECEDENTE_VIEJO_IDENTIFICADO"
+                                    else "UNCHANGED"
+                                ),
+                            )
+                        )
+                    return source_id, run_id, items
+            except Exception as err:
+                raise ExternalMapCorruptError(
+                    f"Fallo al leer mapa canónico CSV '{path}': {err}"
+                ) from err
 
         # Intentar formato completo (mapa_*.json)
         try:
@@ -117,16 +175,32 @@ class DuckDBDiffEngine(ReconciliationEnginePort):
     def compute_diff(
         self,
         source_id: str,
-        external_map_path: Path,
+        external_map_path: Path | None = None,
+        external_api_url: str | None = None,
     ) -> ReconciliationDiffReport:
-        """Compara las URLs externas con el inventario Bronze local."""
-        map_path = Path(external_map_path)
-        if not map_path.exists():
-            raise ExternalMapNotFoundError(
-                f"No se encontró el mapa del Prospector Externo en '{map_path}'"
+        """Compara el inventario externo con el almacenamiento local Bronze."""
+        if external_map_path is not None:
+            map_path = Path(external_map_path)
+            if not map_path.exists():
+                raise ExternalMapNotFoundError(
+                    f"No se encontró el mapa del Prospector Externo en '{map_path}'"
+                )
+            src_id, run_id, discovered = self._extract_resources_with_duckdb(
+                map_path, source_filter=source_id
             )
-
-        src_id, run_id, discovered = self._extract_resources_with_duckdb(map_path)
+        else:
+            discovered = self._external_client.fetch_resources(
+                source_id=source_id,
+                base_url=external_api_url,
+            )
+            src_id = source_id
+            run_id = (
+                self._external_client.get_latest_run_id(
+                    source_id=source_id,
+                    base_url=external_api_url,
+                )
+                or f"run_rest_{source_id}"
+            )
 
         diff_items: list[ReconciliationDiffReportItem] = []
         confirmed_count = 0
@@ -134,18 +208,27 @@ class DuckDBDiffEngine(ReconciliationEnginePort):
         modified_count = 0
 
         for item in discovered:
+            domain = urlparse(item.url).netloc or source_id
+            dataset_code = f"DS_BO_{source_id.upper()}"
+
             # 1. Verificar si ya existe en Capa Bronze por checksum
             cached = None
             if item.content_hash:
                 cached = self._storage.find_by_checksum(item.content_hash)
 
-            # 2. Si no hay content_hash o no se halló, verificar por periodo/url
+            # 2. Si no hay content_hash o no se halló, verificar por periodo
             if cached is None and item.period_label:
                 cached = self._storage.find_by_period(
-                    domain=source_id,
-                    dataset_code=f"DS_BO_{source_id.upper()}",
+                    domain=domain,
+                    dataset_code=dataset_code,
                     period=item.period_label,
                 )
+                if cached is None and domain != source_id:
+                    cached = self._storage.find_by_period(
+                        domain=source_id,
+                        dataset_code=dataset_code,
+                        period=item.period_label,
+                    )
 
             if cached is not None:
                 category = ResourceChangeCategory.CONFIRMED

@@ -5,6 +5,7 @@ SHA-256 en vuelo y renombrado atómico en el sistema de archivos del SO.
 """
 
 import hashlib
+import json
 import os
 import uuid
 from datetime import datetime, timezone
@@ -27,11 +28,71 @@ class LocalBronzeStorage(BronzeStoragePort):
     def __init__(self, base_path: Path) -> None:
         self._base_path = Path(base_path)
         self._base_path.mkdir(parents=True, exist_ok=True)
+        self._manifest_file = self._base_path / "bronze_manifest.json"
         # Índice en memoria para resolución O(1) de descargas históricas
         # Claves: (domain, dataset_code, period) -> BronzeArtifact
         self._index_by_period: dict[tuple[str, str, str], BronzeArtifact] = {}
         # Claves: checksum_sha256 -> BronzeArtifact
         self._index_by_checksum: dict[str, BronzeArtifact] = {}
+        self._load_manifest()
+
+    def _load_manifest(self) -> None:
+        """Carga el índice persistido de artefactos de Capa Bronze si existe."""
+        if not self._manifest_file.exists():
+            return
+        try:
+            with open(self._manifest_file, "r", encoding="utf-8") as f_in:
+                data = json.load(f_in)
+            for entry in data.get("artifacts", []):
+                art = BronzeArtifact(
+                    artifact_id=entry["artifact_id"],
+                    dataset_code=entry["dataset_code"],
+                    domain=entry["domain"],
+                    file_path=Path(entry["file_path"]),
+                    sha256_hash=entry["sha256_hash"],
+                    size_bytes=entry["size_bytes"],
+                    downloaded_at=datetime.fromisoformat(entry["downloaded_at"]),
+                    http_status=entry.get("http_status", 200),
+                    content_type=entry.get("content_type"),
+                )
+                period = entry.get("period", "")
+                self._index_by_period[(art.domain, art.dataset_code, period)] = art
+                self._index_by_checksum[art.sha256_hash] = art
+        except Exception:
+            pass
+
+    def _save_manifest_entry(
+        self, artifact: BronzeArtifact, period: str
+    ) -> None:
+        """Registra un nuevo artefacto en el manifiesto atómico en disco."""
+        entries = []
+        if self._manifest_file.exists():
+            try:
+                with open(self._manifest_file, "r", encoding="utf-8") as f_in:
+                    entries = json.load(f_in).get("artifacts", [])
+            except Exception:
+                entries = []
+        entries.append(
+            {
+                "artifact_id": artifact.artifact_id,
+                "dataset_code": artifact.dataset_code,
+                "domain": artifact.domain,
+                "file_path": str(artifact.file_path),
+                "sha256_hash": artifact.sha256_hash,
+                "size_bytes": artifact.size_bytes,
+                "downloaded_at": artifact.downloaded_at.isoformat(),
+                "http_status": artifact.http_status,
+                "content_type": artifact.content_type,
+                "period": period,
+            }
+        )
+        tmp_manifest = self._manifest_file.with_suffix(".tmp.json")
+        try:
+            with open(tmp_manifest, "w", encoding="utf-8") as f_out:
+                json.dump({"artifacts": entries}, f_out, indent=2)
+            os.replace(tmp_manifest, self._manifest_file)
+        except OSError:
+            pass
 
     def store_stream(
         self,
@@ -108,9 +169,10 @@ class LocalBronzeStorage(BronzeStoragePort):
                 content_type=content_type,
             )
 
-            # Registrar en índices
+            # Registrar en índices y persistir en manifiesto
             self._index_by_period[(domain, dataset_code, period)] = artifact
             self._index_by_checksum[calculated_hash] = artifact
+            self._save_manifest_entry(artifact, period)
 
             return artifact
 
@@ -123,8 +185,34 @@ class LocalBronzeStorage(BronzeStoragePort):
                     pass
 
     def find_by_checksum(self, checksum: str) -> BronzeArtifact | None:
-        """Localiza un artefacto por su hash SHA-256."""
-        return self._index_by_checksum.get(checksum)
+        """Localiza un artefacto por su hash SHA-256 en memoria o disco."""
+        artifact = self._index_by_checksum.get(checksum)
+        if artifact is not None:
+            return artifact
+
+        # Búsqueda física en disco como respaldo
+        matches = list(self._base_path.glob(f"**/{checksum}.dat"))
+        if matches:
+            file_path = matches[0]
+            try:
+                st = file_path.stat()
+                recovered = BronzeArtifact(
+                    artifact_id=f"bronze_{checksum[:16]}",
+                    dataset_code="RECOVERED_FROM_STORAGE",
+                    domain=file_path.parent.parent.parent.name,
+                    file_path=file_path,
+                    sha256_hash=checksum,
+                    size_bytes=st.st_size,
+                    downloaded_at=datetime.fromtimestamp(
+                        st.st_mtime, tz=timezone.utc
+                    ),
+                    http_status=200,
+                )
+                self._index_by_checksum[checksum] = recovered
+                return recovered
+            except OSError:
+                return None
+        return None
 
     def find_by_period(
         self,
@@ -133,7 +221,17 @@ class LocalBronzeStorage(BronzeStoragePort):
         period: str,
     ) -> BronzeArtifact | None:
         """Localiza un artefacto por dominio, dataset y periodo."""
-        return self._index_by_period.get((domain, dataset_code, period))
+        # 1. Búsqueda exacta
+        exact = self._index_by_period.get((domain, dataset_code, period))
+        if exact is not None:
+            return exact
+
+        # 2. Búsqueda tolerante por período e institución/dominio
+        for (d, code, p), art in self._index_by_period.items():
+            if p == period and (d == domain or code == dataset_code):
+                return art
+
+        return None
 
     def register_existing_artifact(
         self,
@@ -144,3 +242,4 @@ class LocalBronzeStorage(BronzeStoragePort):
         key = (artifact.domain, artifact.dataset_code, period)
         self._index_by_period[key] = artifact
         self._index_by_checksum[artifact.sha256_hash] = artifact
+        self._save_manifest_entry(artifact, period)

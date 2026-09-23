@@ -2,6 +2,7 @@
 
 import json
 from pathlib import Path
+import pytest
 from starlette.testclient import TestClient
 
 from prospector_interno.adapters.api.main import app
@@ -121,3 +122,102 @@ def test_reconciliation_duckdb_diff(tmp_path: Path) -> None:
     assert len(data["items"]) == 1
     assert "seguros" in data["items"][0]["url"]
     assert data["items"][0]["status"] == "VERIFIED_IN_MAP"
+
+
+def test_gatekeeper_evaluate_with_aliases_and_omitted_domain() -> None:
+    """Verifica que Gatekeeper acepte aliases dataset_id y temporal_period."""
+    payload = {
+        "source_id": "ine",
+        "dataset_id": "estadistica_seguros",
+        "temporal_period": "2026-05",
+    }
+    response = client.post("/api/v1/gatekeeper/evaluate", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["verdict"] in ("PROCEED_DOWNLOAD", "CACHE_HIT_BRONZE")
+
+
+def test_bridge_sync_dry_run_endpoint() -> None:
+    """Verifica que Bridge /sync en modo dry-run no ejecute descargas."""
+    payload = {
+        "source_id": "finrural",
+        "external_map_path": "../prospector_externo/output/finrural/mapa_finrural.json",
+        "batch_size": 5,
+        "execute_downloads": False,
+    }
+    response = client.post("/api/v1/bridge/sync", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["source_id"] == "finrural"
+    assert data["total_tasks"] == 5
+    assert data["completed_tasks"] == 0
+    assert data["is_executed"] is False
+    assert "dry-run" in data["summary"]
+
+
+def test_bridge_reconcile_rest_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verifica que POST /bridge/reconcile funcione vía REST sin external_map_path."""
+    import sys
+    from prospector_interno.domain.models import DiscoveredResourceItem
+
+    br_module = sys.modules[
+        "prospector_interno.adapters.api.routers.bridge_router"
+    ]
+    mock_items = [
+        DiscoveredResourceItem(
+            resource_key="rest_item_1",
+            url="https://www.bbv.com.bo/rest_item_1.pdf",
+            source_id="bbv",
+            title="Item 1",
+            file_extension=".pdf",
+            period_label="2099-12",
+        )
+    ]
+
+    monkeypatch.setattr(
+        br_module._diff_engine._external_client,
+        "fetch_resources",
+        lambda source_id, base_url=None: mock_items,
+    )
+    monkeypatch.setattr(
+        br_module._diff_engine._external_client,
+        "get_latest_run_id",
+        lambda source_id=None, base_url=None: "run_mock_rest_01",
+    )
+
+    payload = {"source_id": "bbv"}
+    response = client.post("/api/v1/bridge/reconcile", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["source_id"] == "bbv"
+    assert data["run_id"] == "run_mock_rest_01"
+    assert data["total_external_resources"] == 1
+    assert data["total_new"] == 1
+
+
+def test_bridge_reconcile_502_on_connection_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verifica respuesta 502 si el Prospector Externo no responde en red."""
+    import sys
+    from prospector_interno.domain.exceptions import (
+        ExternalCatalogConnectionError,
+    )
+
+    br_module = sys.modules[
+        "prospector_interno.adapters.api.routers.bridge_router"
+    ]
+
+    def mock_fetch_fail(source_id: str, base_url: str | None = None) -> list:
+        raise ExternalCatalogConnectionError("Connection refused on port 8000")
+
+    monkeypatch.setattr(
+        br_module._diff_engine._external_client,
+        "fetch_resources",
+        mock_fetch_fail,
+    )
+
+    payload = {"source_id": "bbv"}
+    response = client.post("/api/v1/bridge/reconcile", json=payload)
+    assert response.status_code == 502
+    assert "Connection refused on port 8000" in response.json()["detail"]

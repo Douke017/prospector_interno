@@ -25,6 +25,8 @@ from prospector_interno.application.bridge.sync_orchestrator import (
 from prospector_interno.application.gatekeeper import PreFlightGatekeeper
 from prospector_interno.application.scheduler import DomainTokenBucket
 from prospector_interno.domain.exceptions import (
+    ExternalCatalogConnectionError,
+    ExternalCatalogResponseError,
     ExternalMapCorruptError,
     ExternalMapNotFoundError,
 )
@@ -59,11 +61,14 @@ def reconcile_external_map(
     request: BridgeReconcileRequest,
 ) -> BridgeReconcileResponse:
     """Ejecuta el diff vectorizado entre el JSON externo y Capa Bronze."""
-    map_path = Path(request.external_map_path)
+    map_path = (
+        Path(request.external_map_path) if request.external_map_path else None
+    )
     try:
         report = _diff_engine.compute_diff(
             source_id=request.source_id,
             external_map_path=map_path,
+            external_api_url=request.external_api_url,
         )
         msg = (
             f"Conciliación finalizada: {report.total_confirmed} confirmados, "
@@ -79,6 +84,8 @@ def reconcile_external_map(
             total_modified=report.total_modified,
             summary_message=msg,
         )
+    except (ExternalCatalogConnectionError, ExternalCatalogResponseError) as err:
+        raise HTTPException(status_code=502, detail=str(err)) from err
     except ExternalMapNotFoundError as err:
         raise HTTPException(status_code=404, detail=str(err)) from err
     except ExternalMapCorruptError as err:
@@ -98,11 +105,14 @@ def execute_sync_plan(
     request: BridgeSyncRequest,
 ) -> BridgeSyncResponse:
     """Genera el SyncPlan priorizado y ejecuta la ingesta masiva protegida."""
-    map_path = Path(request.external_map_path)
+    map_path = (
+        Path(request.external_map_path) if request.external_map_path else None
+    )
     try:
         report = _diff_engine.compute_diff(
             source_id=request.source_id,
             external_map_path=map_path,
+            external_api_url=request.external_api_url,
         )
         full_plan = _sync_orchestrator.create_plan(report)
 
@@ -111,6 +121,21 @@ def execute_sync_plan(
         plan_to_run = full_plan.model_copy(
             update={"items": limited_items, "total_tasks": len(limited_items)}
         )
+
+        if not request.execute_downloads:
+            summary = (
+                f"Plan {plan_to_run.plan_id} generado en simulación (dry-run): "
+                f"{len(limited_items)} tareas priorizadas listas para descarga."
+            )
+            return BridgeSyncResponse(
+                plan_id=plan_to_run.plan_id,
+                source_id=plan_to_run.source_id,
+                total_tasks=plan_to_run.total_tasks,
+                completed_tasks=0,
+                failed_tasks=0,
+                is_executed=False,
+                summary=summary,
+            )
 
         executed_plan = _sync_orchestrator.execute_plan(plan_to_run)
 
@@ -129,6 +154,8 @@ def execute_sync_plan(
             is_executed=executed_plan.is_executed,
             summary=summary,
         )
+    except (ExternalCatalogConnectionError, ExternalCatalogResponseError) as err:
+        raise HTTPException(status_code=502, detail=str(err)) from err
     except ExternalMapNotFoundError as err:
         raise HTTPException(status_code=404, detail=str(err)) from err
     except ExternalMapCorruptError as err:

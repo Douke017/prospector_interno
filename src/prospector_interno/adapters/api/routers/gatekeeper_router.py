@@ -2,6 +2,7 @@
 
 import uuid
 from pathlib import Path
+from urllib.parse import urlparse
 from fastapi import APIRouter
 
 from prospector_interno.adapters.api.schemas import (
@@ -36,11 +37,24 @@ def evaluate_ingestion(
     """Ejecuta las reglas de pre-vuelo para prevenir tráfico de red redundante."""
     req_id = request.request_id or f"req-{uuid.uuid4().hex[:8]}"
 
+    domain = request.domain
+    if not domain and request.target_url:
+        domain = urlparse(request.target_url).netloc
+    if not domain and request.source_id:
+        domain = f"www.{request.source_id}.gob.bo"
+    if not domain:
+        domain = "portal.gob.bo"
+
+    target_url = (
+        request.target_url
+        or f"https://{domain}/data/{request.dataset_code}_{request.period}.xlsx"
+    )
+
     domain_request = IngestionRequest(
         request_id=req_id,
         dataset_code=request.dataset_code,
-        domain=request.domain,
-        target_url=request.target_url,
+        domain=domain,
+        target_url=target_url,
         period=request.period,
         force_refresh=request.force_refresh,
     )

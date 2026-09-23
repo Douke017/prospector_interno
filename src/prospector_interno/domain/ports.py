@@ -7,6 +7,7 @@ from typing import BinaryIO
 from prospector_interno.domain.models import (
     BronzeArtifact,
     DatasetSpecification,
+    DiscoveredResourceItem,
     ReconciliationDiffReport,
     SourceDefinition,
     SyncPlan,
@@ -110,6 +111,33 @@ class HttpDownloaderPort(ABC):
         """Descarga una URL por streaming y retorna el buffer con metadatos."""
 
 
+class ExternalCatalogClientPort(ABC):
+    """Puerto para el cliente de consulta REST hacia el Prospector Externo."""
+
+    @abstractmethod
+    def fetch_resources(
+        self,
+        source_id: str,
+        base_url: str | None = None,
+    ) -> list[DiscoveredResourceItem]:
+        """Obtiene la lista de recursos descubiertos para una fuente vía HTTP REST."""
+
+    @abstractmethod
+    def get_latest_run_id(
+        self,
+        source_id: str | None = None,
+        base_url: str | None = None,
+    ) -> str | None:
+        """Consulta el identificador de la última corrida exitosa."""
+
+    @abstractmethod
+    def check_health(
+        self,
+        base_url: str | None = None,
+    ) -> bool:
+        """Verifica la conectividad y disponibilidad de la API externa."""
+
+
 class ReconciliationEnginePort(ABC):
     """Puerto para el motor de diff y conciliación con el Prospector Externo."""
 
@@ -117,9 +145,10 @@ class ReconciliationEnginePort(ABC):
     def compute_diff(
         self,
         source_id: str,
-        external_map_path: Path,
+        external_map_path: Path | None = None,
+        external_api_url: str | None = None,
     ) -> ReconciliationDiffReport:
-        """Compara el mapa externo contra el inventario local usando DuckDB."""
+        """Compara inventario externo contra almacenamiento local con DuckDB."""
 
 
 class SyncOrchestratorPort(ABC):
