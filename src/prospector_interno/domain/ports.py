@@ -1,12 +1,15 @@
 """Puertos del dominio (Interfaces abstractas) para Arquitectura Hexagonal."""
 
 from abc import ABC, abstractmethod
+from pathlib import Path
 from typing import BinaryIO
 
 from prospector_interno.domain.models import (
     BronzeArtifact,
     DatasetSpecification,
+    ReconciliationDiffReport,
     SourceDefinition,
+    SyncPlan,
 )
 
 
@@ -93,3 +96,42 @@ class RateLimiterPort(ABC):
     @abstractmethod
     def acquire_delay(self, domain: str) -> float:
         """Calcula y consume un ticket, retornando la pausa obligatoria."""
+
+
+class HttpDownloaderPort(ABC):
+    """Puerto para clientes de descarga HTTP resilientes y streaming."""
+
+    @abstractmethod
+    def download_to_stream(
+        self,
+        url: str,
+        domain: str,
+    ) -> tuple[BinaryIO, int, str | None]:
+        """Descarga una URL por streaming y retorna el buffer con metadatos."""
+
+
+class ReconciliationEnginePort(ABC):
+    """Puerto para el motor de diff y conciliación con el Prospector Externo."""
+
+    @abstractmethod
+    def compute_diff(
+        self,
+        source_id: str,
+        external_map_path: Path,
+    ) -> ReconciliationDiffReport:
+        """Compara el mapa externo contra el inventario local usando DuckDB."""
+
+
+class SyncOrchestratorPort(ABC):
+    """Puerto para la orquestación y ejecución de planes de sincronización."""
+
+    @abstractmethod
+    def create_plan(
+        self,
+        diff_report: ReconciliationDiffReport,
+    ) -> SyncPlan:
+        """Construye un SyncPlan priorizado a partir del reporte de diff."""
+
+    @abstractmethod
+    def execute_plan(self, plan: SyncPlan) -> SyncPlan:
+        """Ejecuta las descargas del plan depositándolas en Capa Bronze."""

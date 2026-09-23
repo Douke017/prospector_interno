@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 
 from prospector_interno.adapters.api.routers import (
+    bridge_router,
     catalog_router,
     gatekeeper_router,
     reconciliation_router,
@@ -59,6 +60,7 @@ app.add_middleware(
 app.include_router(catalog_router, prefix="/api/v1")
 app.include_router(gatekeeper_router, prefix="/api/v1")
 app.include_router(reconciliation_router, prefix="/api/v1")
+app.include_router(bridge_router, prefix="/api/v1")
 
 
 @app.get("/", include_in_schema=False)

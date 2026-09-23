@@ -130,3 +130,107 @@ class PreFlightEvaluation(BaseModel):
     cached_artifact: BronzeArtifact | None = None
     in_flight_task_id: str | None = None
     lock_acquired: bool = False
+
+
+class ResourceChangeCategory(str, Enum):
+    """Categoría de discrepancia entre mapa externo y almacenamiento local."""
+
+    CONFIRMED = "CONFIRMED"
+    NEW = "NEW"
+    MODIFIED = "MODIFIED"
+    URL_CHANGED = "URL_CHANGED"
+
+
+class DiscoveredResourceItem(BaseModel):
+    """Recurso descubierto proyectado desde el JSON del Prospector Externo."""
+
+    model_config = ConfigDict(frozen=True)
+
+    resource_key: str
+    url: str
+    source_id: str
+    title: str
+    file_extension: str
+    content_type: str | None = None
+    content_length_bytes: int | None = None
+    last_modified_header: str | None = None
+    etag: str | None = None
+    period_label: str | None = None
+    content_hash: str | None = None
+    change_status: str = "UNCHANGED"
+
+
+class ReconciliationDiffReportItem(BaseModel):
+    """Resultado del diff para un recurso específico."""
+
+    model_config = ConfigDict(frozen=True)
+
+    resource_key: str
+    url: str
+    source_id: str
+    category: ResourceChangeCategory
+    file_extension: str
+    period_label: str | None = None
+    size_bytes: int | None = None
+    detail: str
+
+
+class ReconciliationDiffReport(BaseModel):
+    """Reporte formal consolidado de diferencias (HUI-18)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    source_id: str
+    run_id: str
+    generated_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc)
+    )
+    total_external_resources: int
+    total_confirmed: int
+    total_new: int
+    total_modified: int
+    items: list[ReconciliationDiffReportItem]
+
+
+class SyncPriority(str, Enum):
+    """Nivel de prioridad de adquisición en el SyncPlan."""
+
+    CRITICAL = "CRITICAL"
+    HIGH = "HIGH"
+    NORMAL = "NORMAL"
+    LOW = "LOW"
+
+
+class SyncPlanItem(BaseModel):
+    """Tarea individual de sincronización priorizada dentro del SyncPlan."""
+
+    model_config = ConfigDict(frozen=True)
+
+    item_id: str
+    resource_key: str
+    url: str
+    source_id: str
+    domain: str
+    period: str
+    priority: SyncPriority
+    expected_hash: str | None = None
+    status: str = "PENDING"
+    downloaded_artifact: BronzeArtifact | None = None
+    error_message: str | None = None
+
+
+class SyncPlan(BaseModel):
+    """Plan de sincronización priorizado para adquisición masiva (HUI-19)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    plan_id: str
+    source_id: str
+    created_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc)
+    )
+    total_tasks: int
+    items: list[SyncPlanItem]
+    completed_tasks: int = 0
+    failed_tasks: int = 0
+    is_executed: bool = False

@@ -75,3 +75,23 @@ class RateLimitExceededError(SchedulerError):
 
 class LegacySeederError(ProspectorError):
     """Errores durante la extracción y normalización de la base legacy."""
+
+
+class ReconciliationError(ProspectorError):
+    """Errores durante el proceso de diff y conciliación con Prospector Externo."""
+
+
+class ExternalMapNotFoundError(ReconciliationError):
+    """Lanzada cuando el mapa JSON del Prospector Externo no existe."""
+
+
+class ExternalMapCorruptError(ReconciliationError):
+    """Lanzada cuando el formato del mapa JSON no cumple la especificación."""
+
+
+class SyncPlanError(ProspectorError):
+    """Errores en la generación o validación del plan de sincronización."""
+
+
+class DownloadExecutionError(ProspectorError):
+    """Fallo en la descarga HTTP de un recurso de red."""

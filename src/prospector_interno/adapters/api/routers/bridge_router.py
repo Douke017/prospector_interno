@@ -1,0 +1,135 @@
+"""Router para el Reconciliation & Sync Bridge (HUI-18 y HUI-19).
+
+Permite conciliar el inventario del Prospector Interno con los descubrimientos
+del Prospector Externo usando DuckDB y ejecutar el SyncPlan hacia Bronze.
+"""
+
+from pathlib import Path
+from fastapi import APIRouter, HTTPException
+
+from prospector_interno.adapters.api.schemas import (
+    BridgeReconcileRequest,
+    BridgeReconcileResponse,
+    BridgeSyncRequest,
+    BridgeSyncResponse,
+)
+from prospector_interno.adapters.downloader.polite_downloader import (
+    PoliteHttpDownloader,
+)
+from prospector_interno.adapters.memory_state import InMemoryGatekeeperState
+from prospector_interno.adapters.storage.local_bronze import LocalBronzeStorage
+from prospector_interno.application.bridge.diff_engine import DuckDBDiffEngine
+from prospector_interno.application.bridge.sync_orchestrator import (
+    SyncOrchestrator,
+)
+from prospector_interno.application.gatekeeper import PreFlightGatekeeper
+from prospector_interno.application.scheduler import DomainTokenBucket
+from prospector_interno.domain.exceptions import (
+    ExternalMapCorruptError,
+    ExternalMapNotFoundError,
+)
+
+router = APIRouter(prefix="/bridge", tags=["5. Reconciliation & Sync Bridge"])
+
+# Instancias compartidas del Bridge
+_storage = LocalBronzeStorage(base_path=Path("data/bronze"))
+_state = InMemoryGatekeeperState()
+_gatekeeper = PreFlightGatekeeper(storage=_storage, state_registry=_state)
+_rate_limiter = DomainTokenBucket(default_rate=2.0, default_capacity=5.0)
+_downloader = PoliteHttpDownloader(rate_limiter=_rate_limiter)
+
+_diff_engine = DuckDBDiffEngine(storage=_storage)
+_sync_orchestrator = SyncOrchestrator(
+    gatekeeper=_gatekeeper,
+    storage=_storage,
+    downloader=_downloader,
+)
+
+
+@router.post(
+    "/reconcile",
+    response_model=BridgeReconcileResponse,
+    summary="Ejecutar Diff con DuckDB (HUI-18)",
+    description=(
+        "Compara las URLs descubiertas en el mapa del Prospector Externo "
+        "contra el almacenamiento local en Capa Bronze y categoriza discrepancias."
+    ),
+)
+def reconcile_external_map(
+    request: BridgeReconcileRequest,
+) -> BridgeReconcileResponse:
+    """Ejecuta el diff vectorizado entre el JSON externo y Capa Bronze."""
+    map_path = Path(request.external_map_path)
+    try:
+        report = _diff_engine.compute_diff(
+            source_id=request.source_id,
+            external_map_path=map_path,
+        )
+        msg = (
+            f"Conciliación finalizada: {report.total_confirmed} confirmados, "
+            f"{report.total_new} nuevos para descarga, "
+            f"{report.total_modified} modificados."
+        )
+        return BridgeReconcileResponse(
+            source_id=report.source_id,
+            run_id=report.run_id,
+            total_external_resources=report.total_external_resources,
+            total_confirmed=report.total_confirmed,
+            total_new=report.total_new,
+            total_modified=report.total_modified,
+            summary_message=msg,
+        )
+    except ExternalMapNotFoundError as err:
+        raise HTTPException(status_code=404, detail=str(err)) from err
+    except ExternalMapCorruptError as err:
+        raise HTTPException(status_code=422, detail=str(err)) from err
+
+
+@router.post(
+    "/sync",
+    response_model=BridgeSyncResponse,
+    summary="Generar y ejecutar SyncPlan hacia Bronze (HUI-19)",
+    description=(
+        "Crea el plan de sincronización priorizado y descarga ordenadamente "
+        "los recursos faltantes pasando por el Gatekeeper hacia Capa Bronze."
+    ),
+)
+def execute_sync_plan(
+    request: BridgeSyncRequest,
+) -> BridgeSyncResponse:
+    """Genera el SyncPlan priorizado y ejecuta la ingesta masiva protegida."""
+    map_path = Path(request.external_map_path)
+    try:
+        report = _diff_engine.compute_diff(
+            source_id=request.source_id,
+            external_map_path=map_path,
+        )
+        full_plan = _sync_orchestrator.create_plan(report)
+
+        # Acotar tareas al límite solicitado para control de ejecución
+        limited_items = full_plan.items[:request.max_downloads]
+        plan_to_run = full_plan.model_copy(
+            update={"items": limited_items, "total_tasks": len(limited_items)}
+        )
+
+        executed_plan = _sync_orchestrator.execute_plan(plan_to_run)
+
+        summary = (
+            f"Plan {executed_plan.plan_id} completado: "
+            f"{executed_plan.completed_tasks} exitosos, "
+            f"{executed_plan.failed_tasks} fallidos de {executed_plan.total_tasks}."
+        )
+
+        return BridgeSyncResponse(
+            plan_id=executed_plan.plan_id,
+            source_id=executed_plan.source_id,
+            total_tasks=executed_plan.total_tasks,
+            completed_tasks=executed_plan.completed_tasks,
+            failed_tasks=executed_plan.failed_tasks,
+            is_executed=executed_plan.is_executed,
+            summary=summary,
+        )
+    except ExternalMapNotFoundError as err:
+        raise HTTPException(status_code=404, detail=str(err)) from err
+    except ExternalMapCorruptError as err:
+        raise HTTPException(status_code=422, detail=str(err)) from err

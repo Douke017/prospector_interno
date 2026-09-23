@@ -126,3 +126,62 @@ class ReconciliationDiffResponse(BaseModel):
     matches_count: int
     duration_ms: float
     items: list[ReconciliationDiffItem]
+
+
+class BridgeReconcileRequest(BaseModel):
+    """Petición formal para ejecutar el diff de conciliación (HUI-18)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    source_id: str = Field(..., examples=["finrural"])
+    external_map_path: str = Field(
+        ...,
+        examples=["prospector_externo/output/finrural/mapa_finrural.json"],
+        description="Ruta relativa o absoluta al mapa JSON del Externo",
+    )
+
+
+class BridgeReconcileResponse(BaseModel):
+    """Resultado formal del diff categorizado por el Bridge (HUI-18)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    source_id: str
+    run_id: str
+    total_external_resources: int
+    total_confirmed: int
+    total_new: int
+    total_modified: int
+    summary_message: str
+
+
+class BridgeSyncRequest(BaseModel):
+    """Petición para generar y ejecutar el SyncPlan hacia Bronze (HUI-19)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    source_id: str = Field(..., examples=["finrural"])
+    external_map_path: str = Field(
+        ...,
+        examples=["prospector_externo/output/finrural/mapa_finrural.json"],
+    )
+    max_downloads: int = Field(
+        default=10,
+        ge=1,
+        le=50,
+        description="Límite máximo de descargas a procesar en esta ejecución",
+    )
+
+
+class BridgeSyncResponse(BaseModel):
+    """Resultado de la ejecución del SyncPlan hacia Capa Bronze (HUI-19)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    plan_id: str
+    source_id: str
+    total_tasks: int
+    completed_tasks: int
+    failed_tasks: int
+    is_executed: bool
+    summary: str
