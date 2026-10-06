@@ -1,7 +1,9 @@
-"""Router de Catálogo de Fuentes y Series para Portal Nexus."""
+"""Router de Catálogo de Fuentes, Activos y Grafo de Linaje (HUI-17)."""
 
+from pathlib import Path
 from typing import Any
 from fastapi import APIRouter, HTTPException, Query
+
 import psycopg
 from psycopg.rows import dict_row
 
@@ -10,6 +12,18 @@ from prospector_interno.adapters.api.schemas import (
     DatasetResponse,
     SourceResponse,
 )
+from prospector_interno.adapters.storage.sqlite_catalog_lineage import (
+    SqliteLineageAdapter,
+)
+from prospector_interno.application.lineage.lineage_tracker import (
+    LineageTracker,
+)
+from prospector_interno.domain.contracts.lineage_spec import (
+    AssetLineageGraphResponse,
+    InternalAssetRecord,
+    LineageIntegrityCheckResult,
+)
+from prospector_interno.domain.exceptions import EntityNotFoundError
 
 router = APIRouter(prefix="/catalog", tags=["1. Catálogo Portal Nexus"])
 
@@ -18,8 +32,25 @@ DB_CONN = (
     "user=postgres password=postgres"
 )
 
+_default_lineage_adapter = SqliteLineageAdapter(
+    Path("data/catalog/datax_catalog.db")
+)
+_lineage_tracker = LineageTracker(_default_lineage_adapter)
+
+
+def get_lineage_tracker() -> LineageTracker:
+    """Obtiene la instancia activa del servicio de linaje."""
+    return _lineage_tracker
+
+
+def set_lineage_tracker(tracker: LineageTracker) -> None:
+    """Sobrescribe la instancia activa de LineageTracker (útil para tests)."""
+    global _lineage_tracker
+    _lineage_tracker = tracker
+
 
 @router.get(
+
     "/stats",
     response_model=CatalogStatsResponse,
     summary="Obtener métricas consolidadas del catálogo",
@@ -187,4 +218,84 @@ def search_datasets(
         raise HTTPException(
             status_code=503,
             detail=f"Error en consulta de datasets: {err}",
+        ) from err
+
+
+@router.get(
+    "/assets",
+    response_model=list[InternalAssetRecord],
+    summary="Listar activos de datos catalogados en inventario técnico (HUI-15/HUI-17)",
+    description=(
+        "Consulta el inventario de activos catalogados filtrando opcionalmente "
+        "por capa de persistencia (BRONZE, SILVER, GOLD) y fuente."
+    ),
+)
+def list_catalog_assets(
+    storage_layer: str | None = Query(
+        default=None,
+        description="Filtro por capa (BRONZE, SILVER, GOLD)",
+    ),
+    source_id: str | None = Query(
+        default=None,
+        description="Filtro por código de fuente (ej: 'finrural', 'asfi')",
+    ),
+) -> list[InternalAssetRecord]:
+    """Retorna los activos registrados en el catálogo relacional."""
+    tracker = get_lineage_tracker()
+    return tracker._repository.list_assets(
+        storage_layer=storage_layer,
+        source_id=source_id,
+    )
+
+
+@router.get(
+    "/assets/{asset_id}/lineage",
+    response_model=AssetLineageGraphResponse,
+    summary="Consultar grafo de linaje y cadena de custodia (HUI-17)",
+    description=(
+        "Reconstruye la ruta de procedencia criptográfica de un activo: "
+        "archivos Bronze de origen, hashes SHA-256, run_id del Externo "
+        "y pasos ejecutados."
+    ),
+
+)
+def get_asset_lineage(asset_id: str) -> AssetLineageGraphResponse:
+    """Retorna el árbol de linaje y cadena de custodia de un activo."""
+    tracker = get_lineage_tracker()
+    try:
+        return tracker.get_asset_lineage_graph(asset_id)
+    except EntityNotFoundError as err:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Activo '{asset_id}' no encontrado en el inventario de linaje.",
+        ) from err
+
+
+@router.get(
+    "/assets/{asset_id}/verify",
+    response_model=LineageIntegrityCheckResult,
+    summary="Auditar integridad criptográfica de un activo y sus insumos (HUI-17)",
+    description=(
+        "Recalcula en tiempo real los hashes SHA-256 de los archivos en disco "
+        "y los compara contra los registros inmutables de la cadena de custodia."
+    ),
+)
+def verify_asset_integrity(
+    asset_id: str,
+    bronze_dir: str | None = Query(
+        default="data/bronze",
+        description="Directorio base de insumos Bronze para validación cruzada",
+    ),
+) -> LineageIntegrityCheckResult:
+    """Verifica la integridad criptográfica de un activo y sus insumos."""
+    tracker = get_lineage_tracker()
+    try:
+        return tracker.verify_asset_integrity(
+            asset_id=asset_id,
+            base_bronze_dir=Path(bronze_dir) if bronze_dir else None,
+        )
+    except EntityNotFoundError as err:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Activo '{asset_id}' no encontrado para verificación.",
         ) from err

@@ -9,6 +9,7 @@ import duckdb
 from prospector_interno.domain.contracts.gold_spec import (
     GoldMartCarteraRecord,
 )
+from prospector_interno.domain.contracts.lineage_spec import StorageLayer
 from prospector_interno.domain.contracts.silver_spec import (
     SilverFinancialRecord,
 )
@@ -17,10 +18,16 @@ from prospector_interno.domain.contracts.silver_spec import (
 class GoldMaterializer:
     """Consolida registros de Capa Silver en Datamarts Parquet particionados."""
 
-    def __init__(self, base_gold_path: Path | None = None) -> None:
+    def __init__(
+        self,
+        base_gold_path: Path | None = None,
+        lineage_tracker: Any = None,
+    ) -> None:
         self._base_path = base_gold_path or Path("data/gold")
+        self._lineage_tracker = lineage_tracker
 
     def transform_to_mart_cartera(
+
         self,
         silver_records: list[SilverFinancialRecord],
     ) -> list[GoldMartCarteraRecord]:
@@ -97,8 +104,10 @@ class GoldMaterializer:
     def materialize_mart_cartera(
         self,
         gold_records: list[GoldMartCarteraRecord],
+        external_run_id: str = "RUN_EXT_UNKNOWN",
     ) -> Path:
         """Escribe las particiones Parquet en disco usando DuckDB vectorizado."""
+
         mart_dir = self._base_path / "mart_cartera"
         mart_dir.mkdir(parents=True, exist_ok=True)
 
@@ -166,5 +175,41 @@ class GoldMaterializer:
             (FORMAT PARQUET, PARTITION_BY (gestion, mes), OVERWRITE_OR_IGNORE 1)
         """
         )
+
+        if self._lineage_tracker and gold_records:
+            partitions: dict[tuple[int, int], list[GoldMartCarteraRecord]] = (
+                defaultdict(list)
+            )
+            for r in gold_records:
+                partitions[(r.gestion, r.mes)].append(r)
+
+            for (gestion, mes), recs in partitions.items():
+                asset_id = f"gold_mart_cartera_{gestion}_{mes:02d}"
+                part_dir = mart_dir / f"gestion={gestion}" / f"mes={mes}"
+                files = list(part_dir.glob("*.parquet"))
+                total_size = (
+                    sum(f.stat().st_size for f in files) if files else 0
+                )
+                first_file = files[0] if files else part_dir
+                period_str = f"{gestion}-{mes:02d}-01"
+                self._lineage_tracker.register_asset(
+                    asset_id=asset_id,
+                    source_id="finrural",
+                    dataset_id="mart_cartera",
+                    period_start=period_str,
+                    period_end=period_str,
+                    storage_layer=StorageLayer.GOLD,
+                    file_path=first_file,
+                    row_count=len(recs),
+                    size_bytes=total_size,
+                )
+                unique_shas = {r.source_file_sha256 for r in recs}
+                for sha in unique_shas:
+                    self._lineage_tracker.link_bronze_source(
+                        gold_asset_id=asset_id,
+                        bronze_source_file=f"insumo_bronze_{sha[:8]}.pdf",
+                        bronze_file_sha256=sha,
+                        external_run_id=external_run_id,
+                    )
 
         return mart_dir

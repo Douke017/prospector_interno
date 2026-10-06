@@ -13,8 +13,11 @@ from prospector_interno.adapters.api.schemas import (
     BridgeSyncRequest,
     BridgeSyncResponse,
 )
-from prospector_interno.adapters.downloader.polite_downloader import (
-    PoliteHttpDownloader,
+from prospector_interno.adapters.downloader.circuit_breaker import (
+    DomainCircuitBreaker,
+)
+from prospector_interno.adapters.downloader.resumable_stream_downloader import (
+    ResumableStreamDownloader,
 )
 from prospector_interno.adapters.memory_state import InMemoryGatekeeperState
 from prospector_interno.adapters.storage.local_bronze import LocalBronzeStorage
@@ -24,6 +27,9 @@ from prospector_interno.application.bridge.sync_orchestrator import (
 )
 from prospector_interno.application.gatekeeper import PreFlightGatekeeper
 from prospector_interno.application.scheduler import DomainTokenBucket
+from prospector_interno.domain.contracts.downloader_spec import (
+    DomainCircuitStatus,
+)
 from prospector_interno.domain.exceptions import (
     ExternalCatalogConnectionError,
     ExternalCatalogResponseError,
@@ -38,7 +44,11 @@ _storage = LocalBronzeStorage(base_path=Path("data/bronze"))
 _state = InMemoryGatekeeperState()
 _gatekeeper = PreFlightGatekeeper(storage=_storage, state_registry=_state)
 _rate_limiter = DomainTokenBucket(default_rate=2.0, default_capacity=5.0)
-_downloader = PoliteHttpDownloader(rate_limiter=_rate_limiter)
+_circuit_breaker = DomainCircuitBreaker(default_cooldown_seconds=300.0)
+_downloader = ResumableStreamDownloader(
+    rate_limiter=_rate_limiter,
+    circuit_breaker=_circuit_breaker,
+)
 
 _diff_engine = DuckDBDiffEngine(storage=_storage)
 _sync_orchestrator = SyncOrchestrator(
@@ -173,3 +183,32 @@ def execute_sync_plan(
 def list_bronze_artifacts(source_id: str | None = None) -> list[dict]:
     """Retorna el inventario físico de archivos custodiados en Bronze."""
     return _storage.get_all_artifacts(source_id=source_id)
+
+
+@router.get(
+    "/circuit-breaker/{domain}",
+    response_model=DomainCircuitStatus,
+    summary="Consultar estado del disyuntor para un dominio (HUI-09)",
+    description=(
+        "Permite observar si un dominio está CLOSED (operativo), "
+        "OPEN (en enfriamiento tras 429/503) o HALF_OPEN."
+    ),
+)
+def get_circuit_breaker_status(domain: str) -> DomainCircuitStatus:
+    """Devuelve los metadatos y tiempo restante de enfriamiento."""
+    return _circuit_breaker.get_status(domain)
+
+
+@router.post(
+    "/circuit-breaker/{domain}/reset",
+    summary="Restablecer manualmente el disyuntor de un dominio (HUI-09)",
+    description="Fuerza el retorno del circuito a CLOSED para un portal.",
+)
+def reset_circuit_breaker(domain: str) -> dict[str, str]:
+    """Restablece el disyuntor para el dominio indicado."""
+    _circuit_breaker.reset(domain)
+    return {
+        "status": "RESET",
+        "domain": domain,
+        "message": f"Disyuntor para '{domain}' restablecido a CLOSED.",
+    }

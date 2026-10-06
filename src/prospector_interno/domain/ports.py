@@ -4,6 +4,10 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import BinaryIO
 
+from prospector_interno.domain.contracts.lineage_spec import (
+    DataLineageRecord,
+    InternalAssetRecord,
+)
 from prospector_interno.domain.models import (
     BronzeArtifact,
     DatasetSpecification,
@@ -15,6 +19,7 @@ from prospector_interno.domain.models import (
 
 
 class BronzeStoragePort(ABC):
+
     """Puerto para el almacenamiento inmutable en Capa Bronze."""
 
     @abstractmethod
@@ -175,3 +180,84 @@ class SyncOrchestratorPort(ABC):
     @abstractmethod
     def execute_plan(self, plan: SyncPlan) -> SyncPlan:
         """Ejecuta las descargas del plan depositándolas en Capa Bronze."""
+
+
+class CircuitBreakerPort(ABC):
+    """Puerto para el disyuntor adaptativo por dominio (HUI-09)."""
+
+    @abstractmethod
+    def can_execute(self, domain: str) -> bool:
+        """Determina si un dominio puede admitir nuevas peticiones HTTP."""
+
+    @abstractmethod
+    def record_success(self, domain: str) -> None:
+        """Registra una respuesta exitosa cerrando el circuito."""
+
+    @abstractmethod
+    def record_failure(
+        self,
+        domain: str,
+        status_code: int,
+        retry_after_seconds: float | None = None,
+    ) -> None:
+        """Registra un fallo abriendo el circuito e iniciando enfriamiento."""
+
+    @abstractmethod
+    def get_status(self, domain: str):
+        """Devuelve los metadatos del circuito para el dominio."""
+
+    @abstractmethod
+    def reset(self, domain: str | None = None) -> None:
+        """Restablece el estado del circuito a CLOSED."""
+
+
+class ResumableDownloaderPort(ABC):
+    """Puerto para descargas streaming reanudables con checksum en vuelo (HUI-08)."""
+
+    @abstractmethod
+    def download_file(
+        self,
+        url: str,
+        domain: str,
+        destination_path: Path,
+        expected_checksum: str | None = None,
+    ):
+        """Descarga un archivo en bloques reanudables y valida su hash SHA-256."""
+
+
+class LineageRepositoryPort(ABC):
+    """Puerto para el registro y consulta inmutable de activos y linaje (HUI-17)."""
+
+    @abstractmethod
+    def record_asset(self, asset: InternalAssetRecord) -> None:
+        """Registra o actualiza un activo de datos en el inventario."""
+
+    @abstractmethod
+    def get_asset(self, asset_id: str) -> InternalAssetRecord | None:
+        """Obtiene un activo de datos por su identificador único."""
+
+    @abstractmethod
+    def list_assets(
+        self,
+        storage_layer: str | None = None,
+        source_id: str | None = None,
+    ) -> list[InternalAssetRecord]:
+        """Lista activos catalogados con filtros opcionales."""
+
+    @abstractmethod
+    def record_lineage(self, lineage: DataLineageRecord) -> None:
+        """Inserta un enlace inmutable de linaje entre Gold y Bronze."""
+
+    @abstractmethod
+    def get_lineage_by_asset(
+        self,
+        gold_asset_id: str,
+    ) -> list[DataLineageRecord]:
+        """Recupera todos los registros de linaje de un activo Gold."""
+
+    @abstractmethod
+    def get_lineage_by_checksum(
+        self,
+        bronze_file_sha256: str,
+    ) -> list[DataLineageRecord]:
+        """Recupera los vínculos de linaje asociados a un archivo Bronze por SHA-256."""

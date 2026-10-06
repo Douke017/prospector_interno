@@ -4,8 +4,21 @@ from prospector_interno.domain.contracts.analytics_spec import (
     AnalyticsQueryRequest,
     AnalyticsQueryResponse,
 )
+from prospector_interno.domain.contracts.downloader_spec import (
+    CircuitState,
+    DomainCircuitStatus,
+    ResumableDownloadResult,
+)
 from prospector_interno.domain.contracts.gold_spec import (
     GoldMartCarteraRecord,
+)
+from prospector_interno.domain.contracts.lineage_spec import (
+    AssetLineageGraphResponse,
+    DataLineageRecord,
+    InternalAssetRecord,
+    LineageIntegrityCheckResult,
+    ProvenanceStep,
+    StorageLayer,
 )
 from prospector_interno.domain.contracts.semantic_spec import (
     FinancialMetricDefinition,
@@ -27,13 +40,22 @@ __all__ = [
     "AccountCategory",
     "AnalyticsQueryRequest",
     "AnalyticsQueryResponse",
+    "AssetLineageGraphResponse",
+    "CircuitState",
+    "DataLineageRecord",
+    "DomainCircuitStatus",
     "FinancialMetricDefinition",
     "GoldMartCarteraRecord",
+    "InternalAssetRecord",
+    "LineageIntegrityCheckResult",
     "MetricDataType",
     "PredefinedViewMetadata",
     "PredefinedViewQueryRequest",
     "PredefinedViewResult",
+    "ProvenanceStep",
+    "ResumableDownloadResult",
     "SemanticDictionaryResponse",
     "SilverFinancialRecord",
     "StatementType",
+    "StorageLayer",
 ]
