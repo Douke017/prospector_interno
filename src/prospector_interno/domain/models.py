@@ -98,7 +98,9 @@ class IngestionRequest(BaseModel):
     @property
     def idempotency_key(self) -> str:
         """Clave única para detectar duplicados concurrentes e históricos."""
-        return f"{self.domain}:{self.dataset_code}:{self.period}"
+        if self.period and self.period != "LATEST":
+            return f"{self.domain}:{self.dataset_code}:{self.period}:{self.target_url}"
+        return f"{self.domain}:{self.dataset_code}:{self.target_url}"
 
 
 class BronzeArtifact(BaseModel):

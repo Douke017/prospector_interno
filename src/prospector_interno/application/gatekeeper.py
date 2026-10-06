@@ -43,11 +43,13 @@ class PreFlightGatekeeper:
 
         # 1. Verificación de Cache Hit (HUI-01)
         if not request.force_refresh:
-            cached = self._storage.find_by_period(
-                domain=request.domain,
-                dataset_code=request.dataset_code,
-                period=request.period,
-            )
+            cached = self._storage.find_by_url(request.target_url)
+            if cached is None and request.period and request.period != "LATEST":
+                cached = self._storage.find_by_period(
+                    domain=request.domain,
+                    dataset_code=request.dataset_code,
+                    period=request.period,
+                )
             if cached is not None:
                 return PreFlightEvaluation(
                     verdict=PreFlightVerdict.CACHE_HIT_BRONZE,

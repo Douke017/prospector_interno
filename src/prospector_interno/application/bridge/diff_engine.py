@@ -211,12 +211,18 @@ class DuckDBDiffEngine(ReconciliationEnginePort):
             domain = urlparse(item.url).netloc or source_id
             dataset_code = f"DS_BO_{source_id.upper()}"
 
-            # 1. Verificar si ya existe en Capa Bronze por checksum
-            cached = None
-            if item.content_hash:
+            # 1. Verificar si ya existe en Capa Bronze por URL exacta de descarga
+            cached = self._storage.find_by_url(item.url)
+
+            # 2. Verificar por clave canónica de recurso (resource_key)
+            if cached is None and item.resource_key:
+                cached = self._storage.find_by_resource_key(item.resource_key)
+
+            # 3. Verificar si ya existe por checksum de contenido
+            if cached is None and item.content_hash:
                 cached = self._storage.find_by_checksum(item.content_hash)
 
-            # 2. Si no hay content_hash o no se halló, verificar por periodo
+            # 4. Si no hay content_hash o no se halló, verificar por periodo
             if cached is None and item.period_label:
                 cached = self._storage.find_by_period(
                     domain=domain,

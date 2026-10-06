@@ -160,3 +160,16 @@ def execute_sync_plan(
         raise HTTPException(status_code=404, detail=str(err)) from err
     except ExternalMapCorruptError as err:
         raise HTTPException(status_code=422, detail=str(err)) from err
+
+
+@router.get(
+    "/artifacts",
+    summary="Listar inventario de artefactos en Capa Bronze",
+    description=(
+        "Devuelve la lista física de archivos resguardados en Capa Bronze "
+        "con sus firmas criptográficas SHA-256."
+    ),
+)
+def list_bronze_artifacts(source_id: str | None = None) -> list[dict]:
+    """Retorna el inventario físico de archivos custodiados en Bronze."""
+    return _storage.get_all_artifacts(source_id=source_id)

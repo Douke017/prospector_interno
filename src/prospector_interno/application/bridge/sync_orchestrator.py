@@ -164,6 +164,8 @@ class SyncOrchestrator(SyncOrchestratorPort):
                     stream=stream,
                     expected_checksum=item.expected_hash,
                     content_type=content_type,
+                    url=item.url,
+                    resource_key=item.resource_key,
                 )
 
                 executed_items.append(

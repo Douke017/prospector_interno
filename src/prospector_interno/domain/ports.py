@@ -25,6 +25,9 @@ class BronzeStoragePort(ABC):
         period: str,
         stream: BinaryIO,
         expected_checksum: str | None = None,
+        content_type: str | None = None,
+        url: str | None = None,
+        resource_key: str | None = None,
     ) -> BronzeArtifact:
         """Escribe un stream en un archivo temporal y lo renombra atómicamente."""
 
@@ -40,6 +43,14 @@ class BronzeStoragePort(ABC):
         period: str,
     ) -> BronzeArtifact | None:
         """Busca si ya existe una descarga previa válida para el periodo."""
+
+    @abstractmethod
+    def find_by_url(self, url: str) -> BronzeArtifact | None:
+        """Busca si un artefacto ya existe por su URL original."""
+
+    @abstractmethod
+    def find_by_resource_key(self, resource_key: str) -> BronzeArtifact | None:
+        """Busca si un artefacto ya existe por su clave de recurso."""
 
 
 class GatekeeperStatePort(ABC):

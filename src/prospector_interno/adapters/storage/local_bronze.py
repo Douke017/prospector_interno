@@ -34,6 +34,10 @@ class LocalBronzeStorage(BronzeStoragePort):
         self._index_by_period: dict[tuple[str, str, str], BronzeArtifact] = {}
         # Claves: checksum_sha256 -> BronzeArtifact
         self._index_by_checksum: dict[str, BronzeArtifact] = {}
+        # Claves: url -> BronzeArtifact
+        self._index_by_url: dict[str, BronzeArtifact] = {}
+        # Claves: resource_key -> BronzeArtifact
+        self._index_by_key: dict[str, BronzeArtifact] = {}
         self._load_manifest()
 
     def _load_manifest(self) -> None:
@@ -58,11 +62,21 @@ class LocalBronzeStorage(BronzeStoragePort):
                 period = entry.get("period", "")
                 self._index_by_period[(art.domain, art.dataset_code, period)] = art
                 self._index_by_checksum[art.sha256_hash] = art
+                url = entry.get("url")
+                if url:
+                    self._index_by_url[url] = art
+                r_key = entry.get("resource_key")
+                if r_key:
+                    self._index_by_key[r_key] = art
         except Exception:
             pass
 
     def _save_manifest_entry(
-        self, artifact: BronzeArtifact, period: str
+        self,
+        artifact: BronzeArtifact,
+        period: str,
+        url: str | None = None,
+        resource_key: str | None = None,
     ) -> None:
         """Registra un nuevo artefacto en el manifiesto atómico en disco."""
         entries = []
@@ -84,6 +98,8 @@ class LocalBronzeStorage(BronzeStoragePort):
                 "http_status": artifact.http_status,
                 "content_type": artifact.content_type,
                 "period": period,
+                "url": url,
+                "resource_key": resource_key,
             }
         )
         tmp_manifest = self._manifest_file.with_suffix(".tmp.json")
@@ -102,6 +118,8 @@ class LocalBronzeStorage(BronzeStoragePort):
         stream: BinaryIO,
         expected_checksum: str | None = None,
         content_type: str | None = None,
+        url: str | None = None,
+        resource_key: str | None = None,
     ) -> BronzeArtifact:
         """Escribe un stream de bytes en Capa Bronze de forma atómica e inmutable.
 
@@ -172,7 +190,13 @@ class LocalBronzeStorage(BronzeStoragePort):
             # Registrar en índices y persistir en manifiesto
             self._index_by_period[(domain, dataset_code, period)] = artifact
             self._index_by_checksum[calculated_hash] = artifact
-            self._save_manifest_entry(artifact, period)
+            if url:
+                self._index_by_url[url] = artifact
+            if resource_key:
+                self._index_by_key[resource_key] = artifact
+            self._save_manifest_entry(
+                artifact, period, url=url, resource_key=resource_key
+            )
 
             return artifact
 
@@ -233,6 +257,14 @@ class LocalBronzeStorage(BronzeStoragePort):
 
         return None
 
+    def find_by_url(self, url: str) -> BronzeArtifact | None:
+        """Localiza un artefacto por su URL original de descarga."""
+        return self._index_by_url.get(url)
+
+    def find_by_resource_key(self, resource_key: str) -> BronzeArtifact | None:
+        """Localiza un artefacto por su clave de recurso."""
+        return self._index_by_key.get(resource_key)
+
     def register_existing_artifact(
         self,
         artifact: BronzeArtifact,
@@ -243,3 +275,32 @@ class LocalBronzeStorage(BronzeStoragePort):
         self._index_by_period[key] = artifact
         self._index_by_checksum[artifact.sha256_hash] = artifact
         self._save_manifest_entry(artifact, period)
+
+    def get_artifacts(self) -> list[BronzeArtifact]:
+        """Retorna todos los artefactos indexados en Capa Bronze."""
+        return list(self._index_by_checksum.values())
+
+    def get_all_artifacts(self, source_id: str | None = None) -> list[dict]:
+        """Obtiene la lista de artefactos persistidos físicamente en Bronze."""
+        if not self._manifest_file.exists():
+            return []
+        try:
+            with open(self._manifest_file, "r", encoding="utf-8") as f_in:
+                data = json.load(f_in)
+            artifacts = data.get("artifacts", [])
+            if source_id:
+                src_low = source_id.lower()
+                src_upper = source_id.upper()
+                artifacts = [
+                    art for art in artifacts
+                    if (
+                        src_low in art.get("domain", "").lower()
+                        or src_upper in art.get("dataset_code", "").upper()
+                        or src_low in art.get("dataset_code", "").lower()
+                    )
+                ]
+            # Devolver en orden cronológico inverso (los más recientes primero)
+            artifacts.reverse()
+            return artifacts
+        except Exception:
+            return []
