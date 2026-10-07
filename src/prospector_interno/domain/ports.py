@@ -261,3 +261,23 @@ class LineageRepositoryPort(ABC):
         bronze_file_sha256: str,
     ) -> list[DataLineageRecord]:
         """Recupera los vínculos de linaje asociados a un archivo Bronze por SHA-256."""
+
+
+class GoldPartitionPort(ABC):
+    """Puerto para inspeccionar particiones temporales en Capa Gold (HUI-02)."""
+
+    @abstractmethod
+    def list_available_partitions(
+        self,
+        datamart: str = "mart_cartera",
+    ) -> list[tuple[int, int]]:
+        """Retorna tuplas (gestion, mes) existentes en el datamart Parquet."""
+
+    @abstractmethod
+    def has_partition(
+        self,
+        datamart: str,
+        gestion: int,
+        mes: int,
+    ) -> bool:
+        """Verifica si una partición específica (gestion, mes) existe en Gold."""

@@ -101,9 +101,12 @@ class IngestionEvaluateResponse(BaseModel):
     lock_acquired: bool
     cached_artifact_id: str | None = None
     in_flight_task_id: str | None = None
+    derivation_query: str | None = None
+    missing_periods: list[str] = Field(default_factory=list)
 
 
 class ReconciliationDiffRequest(BaseModel):
+
     """Petición de cruce entre catálogo interno y mapa del Prospector Externo."""
 
     model_config = ConfigDict(frozen=True)

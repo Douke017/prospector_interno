@@ -10,6 +10,8 @@ from prospector_interno.domain.contracts.analytics_spec import (
     AnalyticsQueryRequest,
     AnalyticsQueryResponse,
 )
+from prospector_interno.domain.ports import GoldPartitionPort
+
 
 ALLOWED_COLUMNS: set[str] = {
     "gestion",
@@ -205,4 +207,50 @@ class DuckDBAnalyticsAdapter:
             execution_time_ms=duration_ms,
             columns=raw_cols,
             records=records,
+        )
+
+
+class DuckDBGoldPartitionAdapter(GoldPartitionPort):
+    """Adaptador de inspección de particiones Parquet en Capa Gold (HUI-02)."""
+
+    def __init__(self, base_gold_path: Path | None = None) -> None:
+        self._analytics = DuckDBAnalyticsAdapter(base_gold_path)
+        self._gold_path = base_gold_path or Path("data/gold")
+
+    def list_available_partitions(
+        self,
+        datamart: str = "mart_cartera",
+    ) -> list[tuple[int, int]]:
+        """Retorna tuplas (gestion, mes) existentes en el datamart Parquet."""
+        mart_dir = self._gold_path / datamart
+        if not mart_dir.exists():
+            return []
+        partitions: set[tuple[int, int]] = set()
+        for p in mart_dir.glob("gestion=*/mes=*/*.parquet"):
+            try:
+                g_part = [pt for pt in p.parts if pt.startswith("gestion=")][0]
+                m_part = [pt for pt in p.parts if pt.startswith("mes=")][0]
+                g = int(g_part.split("=")[1])
+                m = int(m_part.split("=")[1])
+                partitions.add((g, m))
+            except Exception:
+                continue
+        return sorted(list(partitions))
+
+    def has_partition(
+        self,
+        datamart: str,
+        gestion: int,
+        mes: int,
+    ) -> bool:
+        """Verifica si una partición específica (gestion, mes) existe en Gold."""
+        part_dir = (
+            self._gold_path / datamart / f"gestion={gestion}" / f"mes={mes}"
+        )
+        if part_dir.exists() and any(part_dir.glob("*.parquet")):
+            return True
+        return self._analytics.has_data(
+            datamart=datamart,
+            gestion=gestion,
+            mes=mes,
         )

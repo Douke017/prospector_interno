@@ -4,11 +4,19 @@ from prospector_interno.domain.contracts.analytics_spec import (
     AnalyticsQueryRequest,
     AnalyticsQueryResponse,
 )
+from prospector_interno.domain.contracts.derivation_spec import (
+    DerivationEvaluationRequest,
+    DerivationEvaluationResult,
+    DerivationGranularity,
+    DerivationStatus,
+    PeriodBreakdown,
+)
 from prospector_interno.domain.contracts.downloader_spec import (
     CircuitState,
     DomainCircuitStatus,
     ResumableDownloadResult,
 )
+
 from prospector_interno.domain.contracts.gold_spec import (
     GoldMartCarteraRecord,
 )
@@ -43,13 +51,20 @@ __all__ = [
     "AssetLineageGraphResponse",
     "CircuitState",
     "DataLineageRecord",
+    "DerivationEvaluationRequest",
+    "DerivationEvaluationResult",
+    "DerivationGranularity",
+    "DerivationStatus",
     "DomainCircuitStatus",
+
     "FinancialMetricDefinition",
     "GoldMartCarteraRecord",
     "InternalAssetRecord",
     "LineageIntegrityCheckResult",
     "MetricDataType",
+    "PeriodBreakdown",
     "PredefinedViewMetadata",
+
     "PredefinedViewQueryRequest",
     "PredefinedViewResult",
     "ProvenanceStep",

@@ -2,6 +2,7 @@
 
 from prospector_interno.adapters.analytics.duckdb_analytics_adapter import (
     DuckDBAnalyticsAdapter,
+    DuckDBGoldPartitionAdapter,
 )
 
-__all__ = ["DuckDBAnalyticsAdapter"]
+__all__ = ["DuckDBAnalyticsAdapter", "DuckDBGoldPartitionAdapter"]

@@ -132,9 +132,12 @@ class PreFlightEvaluation(BaseModel):
     cached_artifact: BronzeArtifact | None = None
     in_flight_task_id: str | None = None
     lock_acquired: bool = False
+    derivation_query: str | None = None
+    missing_periods: list[str] = Field(default_factory=list)
 
 
 class ResourceChangeCategory(str, Enum):
+
     """Categoría de discrepancia entre mapa externo y almacenamiento local."""
 
     CONFIRMED = "CONFIRMED"

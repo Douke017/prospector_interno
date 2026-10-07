@@ -28,12 +28,14 @@ from prospector_interno.domain.ports import (
     BronzeStoragePort,
     CatalogRepositoryPort,
     GatekeeperStatePort,
+    GoldPartitionPort,
     LineageRepositoryPort,
     RateLimiterPort,
 )
 
 
 __all__ = [
+
     "AtomicRenameError",
     "BronzeArtifact",
     "BronzeStoragePort",
@@ -45,7 +47,9 @@ __all__ = [
     "EntityNotFoundError",
     "GatekeeperError",
     "GatekeeperStatePort",
+    "GoldPartitionPort",
     "InFlightCollisionError",
+
     "IngestionRequest",
     "InvalidStateTransitionError",
     "LegacySeederError",

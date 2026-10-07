@@ -1,10 +1,14 @@
-"""Router del Pre-flight Gatekeeper para verificación de cache hits y locks."""
+"""Router del Pre-flight Gatekeeper para cache hits, locks y derivación."""
 
-import uuid
+
 from pathlib import Path
 from urllib.parse import urlparse
+import uuid
 from fastapi import APIRouter
 
+from prospector_interno.adapters.analytics.duckdb_analytics_adapter import (
+    DuckDBGoldPartitionAdapter,
+)
 from prospector_interno.adapters.api.schemas import (
     IngestionEvaluateRequest,
     IngestionEvaluateResponse,
@@ -12,6 +16,13 @@ from prospector_interno.adapters.api.schemas import (
 from prospector_interno.adapters.memory_state import InMemoryGatekeeperState
 from prospector_interno.adapters.storage.local_bronze import LocalBronzeStorage
 from prospector_interno.application.gatekeeper import PreFlightGatekeeper
+from prospector_interno.domain.contracts.derivation_spec import (
+    DerivationEvaluationRequest,
+    DerivationEvaluationResult,
+)
+from prospector_interno.domain.gatekeeper.derivation_filter import (
+    AssetDerivationFilter,
+)
 from prospector_interno.domain.models import IngestionRequest
 
 router = APIRouter(prefix="/gatekeeper", tags=["2. Pre-flight Gatekeeper"])
@@ -19,16 +30,38 @@ router = APIRouter(prefix="/gatekeeper", tags=["2. Pre-flight Gatekeeper"])
 # Instancias compartidas para el runtime de la API
 _storage = LocalBronzeStorage(base_path=Path("data/bronze"))
 _state = InMemoryGatekeeperState()
-_gatekeeper = PreFlightGatekeeper(storage=_storage, state_registry=_state)
+_gold_checker = DuckDBGoldPartitionAdapter(base_gold_path=Path("data/gold"))
+_derivation_filter = AssetDerivationFilter(
+    partition_checker=_gold_checker,
+    base_gold_path=Path("data/gold"),
+)
+_gatekeeper = PreFlightGatekeeper(
+    storage=_storage,
+    state_registry=_state,
+    derivation_filter=_derivation_filter,
+)
+
+
+def set_gatekeeper(gatekeeper: PreFlightGatekeeper) -> None:
+    """Permite inyectar un Gatekeeper aislado para pruebas."""
+    global _gatekeeper
+    _gatekeeper = gatekeeper
+
+
+def set_derivation_filter(filter_instance: AssetDerivationFilter) -> None:
+    """Permite inyectar un filtro de derivación aislado para pruebas."""
+    global _derivation_filter
+    _derivation_filter = filter_instance
 
 
 @router.post(
     "/evaluate",
     response_model=IngestionEvaluateResponse,
-    summary="Evaluar solicitud de ingesta antes de realizar descarga",
+    summary="Evaluar solicitud antes de descarga (HUI-01/HUI-02/HUI-04)",
     description=(
-        "Verifica si el artefacto ya existe en Capa Bronze/Gold (Cache Hit) "
-        "o si otra corrutina ya lo está adquiriendo (In-flight Lock)."
+
+        "Verifica si el artefacto es derivable de Capa Gold (REUSE_DERIVATION), "
+        "si ya existe en Bronze (CACHE_HIT_BRONZE), o si está bloqueado en vuelo."
     ),
 )
 def evaluate_ingestion(
@@ -74,4 +107,23 @@ def evaluate_ingestion(
         lock_acquired=evaluation.lock_acquired,
         cached_artifact_id=cached_id,
         in_flight_task_id=evaluation.in_flight_task_id,
+        derivation_query=evaluation.derivation_query,
+        missing_periods=evaluation.missing_periods,
     )
+
+
+@router.post(
+    "/inspect",
+    response_model=DerivationEvaluationResult,
+    summary="Inspeccionar derivabilidad de periodos macro sobre Capa Gold (HUI-02)",
+    description=(
+        "Evalúa si un periodo macro (anual, trimestral, semestral) puede "
+        "construirse agregando particiones mensuales en Gold sin requerir descargas. "
+        "Si faltan periodos, retorna la lista exacta de insumos pendientes."
+    ),
+)
+def inspect_derivation(
+    request: DerivationEvaluationRequest,
+) -> DerivationEvaluationResult:
+    """Inspecciona la cobertura de particiones para derivación temporal."""
+    return _derivation_filter.evaluate(request)
