@@ -4,6 +4,10 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import BinaryIO
 
+from prospector_interno.domain.contracts.download_lifecycle_spec import (
+    DownloadLifecycleStatus,
+    DownloadRecord,
+)
 from prospector_interno.domain.contracts.lineage_spec import (
     DataLineageRecord,
     InternalAssetRecord,
@@ -281,3 +285,40 @@ class GoldPartitionPort(ABC):
         mes: int,
     ) -> bool:
         """Verifica si una partición específica (gestion, mes) existe en Gold."""
+
+
+class DownloadTrackingPort(ABC):
+    """Puerto para el monitoreo y seguimiento del ciclo de vida de descarga (HUI-03)."""
+
+    @abstractmethod
+    def record_download(self, record: DownloadRecord) -> None:
+        """Registra o inicializa una tarea de descarga física en download_tracking."""
+
+    @abstractmethod
+    def update_status(
+        self,
+        download_id: str,
+        status: DownloadLifecycleStatus,
+        bytes_downloaded: int | None = None,
+        total_bytes: int | None = None,
+        local_path: str | None = None,
+        sha256_checksum: str | None = None,
+        error_code: str | None = None,
+    ) -> None:
+        """Actualiza el estado y progreso de una descarga."""
+
+    @abstractmethod
+    def get_download(self, download_id: str) -> DownloadRecord | None:
+        """Recupera el registro de descarga por su identificador primario."""
+
+    @abstractmethod
+    def find_by_url(self, canonical_url: str) -> DownloadRecord | None:
+        """Recupera el registro de descarga asociado a una URL canónica."""
+
+    @abstractmethod
+    def subscribe_request(self, download_id: str, request_id: str) -> bool:
+        """Suscribe una petición concurrente a la descarga activa en curso."""
+
+    @abstractmethod
+    def list_active_downloads(self) -> list[DownloadRecord]:
+        """Lista todas las descargas en cola (PENDING) o activas (DOWNLOADING)."""

@@ -11,6 +11,12 @@ from prospector_interno.domain.contracts.derivation_spec import (
     DerivationStatus,
     PeriodBreakdown,
 )
+from prospector_interno.domain.contracts.download_lifecycle_spec import (
+    DownloadLifecycleStatus,
+    DownloadRecord,
+    DownloadStateEvaluationRequest,
+    DownloadStateEvaluationResult,
+)
 from prospector_interno.domain.contracts.downloader_spec import (
     CircuitState,
     DomainCircuitStatus,
@@ -56,7 +62,10 @@ __all__ = [
     "DerivationGranularity",
     "DerivationStatus",
     "DomainCircuitStatus",
-
+    "DownloadLifecycleStatus",
+    "DownloadRecord",
+    "DownloadStateEvaluationRequest",
+    "DownloadStateEvaluationResult",
     "FinancialMetricDefinition",
     "GoldMartCarteraRecord",
     "InternalAssetRecord",

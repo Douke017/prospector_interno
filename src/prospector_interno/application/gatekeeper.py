@@ -9,8 +9,14 @@ from contextlib import contextmanager
 from prospector_interno.domain.contracts.derivation_spec import (
     DerivationEvaluationRequest,
 )
+from prospector_interno.domain.contracts.download_lifecycle_spec import (
+    DownloadStateEvaluationRequest,
+)
 from prospector_interno.domain.gatekeeper.derivation_filter import (
     AssetDerivationFilter,
+)
+from prospector_interno.domain.gatekeeper.download_state_filter import (
+    DownloadStateFilter,
 )
 from prospector_interno.domain.models import (
     IngestionRequest,
@@ -31,10 +37,12 @@ class PreFlightGatekeeper:
         storage: BronzeStoragePort,
         state_registry: GatekeeperStatePort,
         derivation_filter: AssetDerivationFilter | None = None,
+        download_state_filter: DownloadStateFilter | None = None,
     ) -> None:
         self._storage = storage
         self._state_registry = state_registry
         self._derivation_filter = derivation_filter
+        self._download_state_filter = download_state_filter
 
     def evaluate(self, request: IngestionRequest) -> PreFlightEvaluation:
         """Evalúa una solicitud antes de permitir cualquier llamada a la red.
@@ -89,7 +97,27 @@ class PreFlightGatekeeper:
                     missing_periods=missing_periods_list,
                 )
 
-        # 3. Verificación de colisión concurrente en vuelo (HUI-04)
+        # 3. Filtro 3: Monitoreo del Ciclo de Ingesta y Suscripción Concurrente (HUI-03)
+        if not request.force_refresh and self._download_state_filter:
+            lifecycle = self._download_state_filter.evaluate(
+                DownloadStateEvaluationRequest(
+                    canonical_url=request.target_url,
+                    request_id=request.request_id,
+                    source_id=request.domain,
+                )
+            )
+            if lifecycle.is_in_progress:
+                return PreFlightEvaluation(
+                    verdict=PreFlightVerdict.IN_PROGRESS,
+                    idempotency_key=key,
+                    reason=lifecycle.explanation,
+                    in_flight_task_id=lifecycle.task_id,
+                    subscribers_count=lifecycle.subscribers_count,
+                    lock_acquired=False,
+                    missing_periods=missing_periods_list,
+                )
+
+        # 4. Verificación de colisión concurrente en vuelo (HUI-04)
         lock_acquired = self._state_registry.try_acquire_lock(
             idempotency_key=key,
             task_id=request.request_id,

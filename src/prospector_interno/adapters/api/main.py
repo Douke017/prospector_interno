@@ -13,6 +13,7 @@ from prospector_interno.adapters.api.routers import (
     bridge_router,
     catalog_router,
     dictionary_router,
+    downloads_router,
     gatekeeper_router,
     reconciliation_router,
 )
@@ -75,6 +76,7 @@ app.add_middleware(
 # Registro de routers modulares
 app.include_router(catalog_router, prefix="/api/v1")
 app.include_router(gatekeeper_router, prefix="/api/v1")
+app.include_router(downloads_router, prefix="/api/v1")
 app.include_router(reconciliation_router, prefix="/api/v1")
 app.include_router(bridge_router, prefix="/api/v1")
 app.include_router(analytics_router, prefix="/api/v1")

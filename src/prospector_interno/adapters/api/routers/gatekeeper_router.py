@@ -15,6 +15,9 @@ from prospector_interno.adapters.api.schemas import (
 )
 from prospector_interno.adapters.memory_state import InMemoryGatekeeperState
 from prospector_interno.adapters.storage.local_bronze import LocalBronzeStorage
+from prospector_interno.adapters.storage.sqlite_download_tracking import (
+    SqliteDownloadTrackingAdapter,
+)
 from prospector_interno.application.gatekeeper import PreFlightGatekeeper
 from prospector_interno.domain.contracts.derivation_spec import (
     DerivationEvaluationRequest,
@@ -22,6 +25,9 @@ from prospector_interno.domain.contracts.derivation_spec import (
 )
 from prospector_interno.domain.gatekeeper.derivation_filter import (
     AssetDerivationFilter,
+)
+from prospector_interno.domain.gatekeeper.download_state_filter import (
+    DownloadStateFilter,
 )
 from prospector_interno.domain.models import IngestionRequest
 
@@ -35,10 +41,15 @@ _derivation_filter = AssetDerivationFilter(
     partition_checker=_gold_checker,
     base_gold_path=Path("data/gold"),
 )
+_download_tracking = SqliteDownloadTrackingAdapter(
+    db_path=Path("data/catalog/datax_catalog.db")
+)
+_download_state_filter = DownloadStateFilter(tracking_port=_download_tracking)
 _gatekeeper = PreFlightGatekeeper(
     storage=_storage,
     state_registry=_state,
     derivation_filter=_derivation_filter,
+    download_state_filter=_download_state_filter,
 )
 
 
@@ -52,6 +63,12 @@ def set_derivation_filter(filter_instance: AssetDerivationFilter) -> None:
     """Permite inyectar un filtro de derivación aislado para pruebas."""
     global _derivation_filter
     _derivation_filter = filter_instance
+
+
+def set_download_state_filter(filter_instance: DownloadStateFilter) -> None:
+    """Permite inyectar un filtro de ciclo de vida de descarga para pruebas."""
+    global _download_state_filter
+    _download_state_filter = filter_instance
 
 
 @router.post(
@@ -107,6 +124,9 @@ def evaluate_ingestion(
         lock_acquired=evaluation.lock_acquired,
         cached_artifact_id=cached_id,
         in_flight_task_id=evaluation.in_flight_task_id,
+        task_id=evaluation.in_flight_task_id,
+        status=evaluation.verdict.value,
+        subscribers_count=evaluation.subscribers_count,
         derivation_query=evaluation.derivation_query,
         missing_periods=evaluation.missing_periods,
     )

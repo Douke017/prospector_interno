@@ -30,6 +30,7 @@ class PreFlightVerdict(str, Enum):
     CACHE_HIT_GOLD = "CACHE_HIT_GOLD"
     IN_FLIGHT_LOCKED = "IN_FLIGHT_LOCKED"
     REUSE_DERIVATION = "REUSE_DERIVATION"
+    IN_PROGRESS = "IN_PROGRESS"
 
 
 class SourceDefinition(BaseModel):
@@ -134,6 +135,7 @@ class PreFlightEvaluation(BaseModel):
     lock_acquired: bool = False
     derivation_query: str | None = None
     missing_periods: list[str] = Field(default_factory=list)
+    subscribers_count: int = 0
 
 
 class ResourceChangeCategory(str, Enum):

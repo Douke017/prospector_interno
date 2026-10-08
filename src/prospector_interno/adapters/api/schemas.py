@@ -101,8 +101,37 @@ class IngestionEvaluateResponse(BaseModel):
     lock_acquired: bool
     cached_artifact_id: str | None = None
     in_flight_task_id: str | None = None
+    task_id: str | None = None
+    status: str | None = None
+    subscribers_count: int = 0
     derivation_query: str | None = None
     missing_periods: list[str] = Field(default_factory=list)
+
+
+class DownloadStatusItemResponse(BaseModel):
+    """Estado resumido de una descarga física para monitoreo en tiempo real."""
+
+    model_config = ConfigDict(frozen=True)
+
+    download_id: str
+    source_id: str
+    canonical_url: str
+    status: str
+    bytes_downloaded: int = 0
+    total_bytes: int = 0
+    task_id: str | None = None
+    subscribers_count: int = 0
+    started_at: str | None = None
+    completed_at: str | None = None
+
+
+class DownloadsStatusListResponse(BaseModel):
+    """Listado consolidado de descargas activas (Sección 13.1)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    total_active: int
+    downloads: list[DownloadStatusItemResponse]
 
 
 class ReconciliationDiffRequest(BaseModel):
