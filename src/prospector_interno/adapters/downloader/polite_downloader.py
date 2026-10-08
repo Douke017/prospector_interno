@@ -6,12 +6,19 @@ navegador real y respeto estricto del control de tasa (Token Bucket con Jitter).
 
 import io
 import time
-from typing import BinaryIO
+from typing import Any, BinaryIO
 
 import httpx
 
+from prospector_interno.adapters.downloader.transport import (
+    RealBrowserTransport,
+)
+from prospector_interno.domain.contracts.downloader_spec import (
+    REALISTIC_BROWSER_HEADERS,
+)
 from prospector_interno.domain.exceptions import DownloadExecutionError
 from prospector_interno.domain.ports import (
+    BrowserTransportPort,
     HttpDownloaderPort,
     RateLimiterPort,
 )
@@ -20,29 +27,22 @@ from prospector_interno.domain.ports import (
 class PoliteHttpDownloader(HttpDownloaderPort):
     """Cliente de adquisición HTTP con emulación de navegador y rate limiting."""
 
-    DEFAULT_USER_AGENT: str = (
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
-    )
+    DEFAULT_USER_AGENT: str = REALISTIC_BROWSER_HEADERS["User-Agent"]
 
     def __init__(
         self,
         rate_limiter: RateLimiterPort | None = None,
         timeout_seconds: float = 30.0,
+        browser_transport: BrowserTransportPort | None = None,
+        transport: httpx.BaseTransport | None = None,
     ) -> None:
         self._rate_limiter = rate_limiter
         self._timeout_seconds = timeout_seconds
+        self._browser_transport = browser_transport or RealBrowserTransport()
+        self._transport = transport
 
     def _get_headers(self) -> dict[str, str]:
-        return {
-            "User-Agent": self.DEFAULT_USER_AGENT,
-            "Accept": (
-                "text/html,application/xhtml+xml,application/xml;"
-                "q=0.9,application/pdf,*/*;q=0.8"
-            ),
-            "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
-            "Connection": "keep-alive",
-        }
+        return self._browser_transport.get_default_headers()
 
     def download_to_stream(
         self,
@@ -59,11 +59,23 @@ class PoliteHttpDownloader(HttpDownloaderPort):
         buffer = io.BytesIO()
 
         try:
-            with httpx.Client(
-                timeout=self._timeout_seconds,
-                follow_redirects=True,
-                headers=self._get_headers(),
-            ) as client:
+            client_kwargs: dict[str, Any] = {
+                "timeout": self._timeout_seconds,
+                "follow_redirects": True,
+                "headers": self._get_headers(),
+            }
+            if self._transport is not None:
+                client_kwargs["transport"] = self._transport
+            elif hasattr(self._browser_transport, "create_http_transport"):
+                client_kwargs["transport"] = (
+                    self._browser_transport.create_http_transport()
+                )
+            if hasattr(self._browser_transport, "profile") and (
+                getattr(self._browser_transport.profile, "http2_enabled", False)
+            ):
+                client_kwargs["http2"] = True
+
+            with httpx.Client(**client_kwargs) as client:
                 with client.stream("GET", url) as response:
                     if response.status_code >= 400:
                         raise DownloadExecutionError(

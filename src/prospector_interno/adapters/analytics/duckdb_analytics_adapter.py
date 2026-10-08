@@ -36,8 +36,29 @@ ALLOWED_COLUMNS: set[str] = {
 class DuckDBAnalyticsAdapter:
     """Motor de consulta SQL vectorizado sobre Datamarts en Capa Gold."""
 
-    def __init__(self, base_gold_path: Path | None = None) -> None:
+    def __init__(
+        self,
+        base_gold_path: Path | None = None,
+        max_memory: str = "4GB",
+    ) -> None:
         self._gold_path = base_gold_path or Path("data/gold")
+        self._max_memory = max_memory
+
+    def _connect(self) -> duckdb.DuckDBPyConnection:
+        """Crea una conexión in-memory aplicando el presupuesto de RAM (HUI-23)."""
+        con = duckdb.connect(":memory:")
+        con.execute(f"SET max_memory = '{self._max_memory}'")
+        return con
+
+    def get_max_memory_setting(self) -> str:
+        """Consulta el valor configurado de max_memory en DuckDB."""
+        con = self._connect()
+        try:
+            return con.execute(
+                "SELECT current_setting('max_memory')"
+            ).fetchone()[0]
+        finally:
+            con.close()
 
     def _resolve_parquet_glob(self, datamart: str) -> str | None:
         """Resuelve el patrón glob de archivos Parquet para el datamart."""
@@ -63,7 +84,7 @@ class DuckDBAnalyticsAdapter:
         if gestion is None and mes is None:
             return True
 
-        con = duckdb.connect(":memory:")
+        con = self._connect()
         clauses = []
         if gestion is not None:
             clauses.append(f"gestion = {int(gestion)}")
@@ -77,6 +98,8 @@ class DuckDBAnalyticsAdapter:
             return count > 0
         except Exception:
             return False
+        finally:
+            con.close()
 
     def get_dimensions(
         self,
@@ -87,7 +110,7 @@ class DuckDBAnalyticsAdapter:
         if not glob_path:
             return {"instituciones": [], "gestiones": [], "meses": []}
 
-        con = duckdb.connect(":memory:")
+        con = self._connect()
         try:
             sql_inst = (
                 f"SELECT DISTINCT institucion_id "
@@ -113,6 +136,8 @@ class DuckDBAnalyticsAdapter:
             }
         except Exception:
             return {"instituciones": [], "gestiones": [], "meses": []}
+        finally:
+            con.close()
 
     def execute_query(
         self,
@@ -182,21 +207,25 @@ class DuckDBAnalyticsAdapter:
             ORDER BY gestion DESC, mes DESC, institucion_id ASC
         """
 
-        con = duckdb.connect(":memory:")
-        con.execute("SET max_memory = '4GB'")
-        cursor = con.execute(sql, params)
-        raw_cols = [c[0] for c in cursor.description]
-        rows = cursor.fetchall()
+        con = self._connect()
+        try:
+            cursor = con.execute(sql, params)
+            raw_cols = [c[0] for c in cursor.description]
+            rows = cursor.fetchall()
 
-        records: list[dict[str, Any]] = []
-        for row in rows:
-            record_dict = {}
-            for col_name, val in zip(raw_cols, row):
-                if isinstance(val, float) and (math.isnan(val) or math.isinf(val)):
-                    record_dict[col_name] = None
-                else:
-                    record_dict[col_name] = val
-            records.append(record_dict)
+            records: list[dict[str, Any]] = []
+            for row in rows:
+                record_dict = {}
+                for col_name, val in zip(raw_cols, row):
+                    if isinstance(val, float) and (
+                        math.isnan(val) or math.isinf(val)
+                    ):
+                        record_dict[col_name] = None
+                    else:
+                        record_dict[col_name] = val
+                records.append(record_dict)
+        finally:
+            con.close()
 
         t_end = time.perf_counter()
         duration_ms = round((t_end - t_start) * 1000, 2)

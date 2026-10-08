@@ -11,7 +11,7 @@ import os
 from pathlib import Path
 import tempfile
 import time
-from typing import BinaryIO
+from typing import Any, BinaryIO
 
 import httpx
 
@@ -19,7 +19,11 @@ from prospector_interno.adapters.downloader.circuit_breaker import (
     DomainCircuitBreaker,
     parse_retry_after,
 )
+from prospector_interno.adapters.downloader.transport import (
+    RealBrowserTransport,
+)
 from prospector_interno.domain.contracts.downloader_spec import (
+    REALISTIC_BROWSER_HEADERS,
     ResumableDownloadResult,
 )
 from prospector_interno.domain.exceptions import (
@@ -27,6 +31,7 @@ from prospector_interno.domain.exceptions import (
     DownloadExecutionError,
 )
 from prospector_interno.domain.ports import (
+    BrowserTransportPort,
     CircuitBreakerPort,
     HttpDownloaderPort,
     RateLimiterPort,
@@ -37,10 +42,7 @@ from prospector_interno.domain.ports import (
 class ResumableStreamDownloader(ResumableDownloaderPort, HttpDownloaderPort):
     """Cliente de adquisición HTTP con streaming a disco, Range y disyuntor."""
 
-    DEFAULT_USER_AGENT: str = (
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
-    )
+    DEFAULT_USER_AGENT: str = REALISTIC_BROWSER_HEADERS["User-Agent"]
     DEFAULT_CHUNK_SIZE: int = 64 * 1024  # 64 KB
 
     def __init__(
@@ -50,33 +52,18 @@ class ResumableStreamDownloader(ResumableDownloaderPort, HttpDownloaderPort):
         timeout_seconds: float = 30.0,
         chunk_size: int = DEFAULT_CHUNK_SIZE,
         transport: httpx.BaseTransport | None = None,
+        browser_transport: BrowserTransportPort | None = None,
     ) -> None:
         self._rate_limiter = rate_limiter
         self._circuit_breaker = circuit_breaker
         self._timeout_seconds = timeout_seconds
         self._chunk_size = chunk_size
         self._transport = transport
+        self._browser_transport = browser_transport or RealBrowserTransport()
 
     def _get_headers(self, range_offset: int | None = None) -> dict[str, str]:
-        headers = {
-            "User-Agent": self.DEFAULT_USER_AGENT,
-            "Accept": (
-                "text/html,application/xhtml+xml,application/xml;"
-                "q=0.9,application/pdf,*/*;q=0.8"
-            ),
-            "Accept-Language": "es-BO,es;q=0.9,en;q=0.8",
-            "Connection": "keep-alive",
-            "Upgrade-Insecure-Requests": "1",
-            "Sec-Ch-Ua": (
-                '"Chromium";v="128", "Not;A=Brand";v="24", "Google Chrome";v="128"'
-            ),
-            "Sec-Ch-Ua-Mobile": "?0",
-            "Sec-Ch-Ua-Platform": '"Linux"',
-            "Sec-Fetch-Dest": "document",
-            "Sec-Fetch-Mode": "navigate",
-            "Sec-Fetch-Site": "none",
-            "Sec-Fetch-User": "?1",
-        }
+
+        headers = self._browser_transport.get_default_headers()
         if range_offset is not None and range_offset > 0:
             headers["Range"] = f"bytes={range_offset}-"
         return headers
@@ -131,12 +118,23 @@ class ResumableStreamDownloader(ResumableDownloaderPort, HttpDownloaderPort):
         bytes_transferred_this_session = 0
 
         try:
-            with httpx.Client(
-                timeout=self._timeout_seconds,
-                follow_redirects=True,
-                headers=headers,
-                transport=self._transport,
-            ) as client:
+            client_kwargs: dict[str, Any] = {
+                "timeout": self._timeout_seconds,
+                "follow_redirects": True,
+                "headers": headers,
+            }
+            if self._transport is not None:
+                client_kwargs["transport"] = self._transport
+            elif hasattr(self._browser_transport, "create_http_transport"):
+                client_kwargs["transport"] = (
+                    self._browser_transport.create_http_transport()
+                )
+            if hasattr(self._browser_transport, "profile") and (
+                getattr(self._browser_transport.profile, "http2_enabled", False)
+            ):
+                client_kwargs["http2"] = True
+
+            with httpx.Client(**client_kwargs) as client:
                 with client.stream("GET", url) as response:
                     status_code = response.status_code
 

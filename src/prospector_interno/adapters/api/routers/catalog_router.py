@@ -15,8 +15,15 @@ from prospector_interno.adapters.api.schemas import (
 from prospector_interno.adapters.storage.sqlite_catalog_lineage import (
     SqliteLineageAdapter,
 )
+from prospector_interno.application.catalog.asset_catalog_service import (
+    AssetCatalogService,
+)
 from prospector_interno.application.lineage.lineage_tracker import (
     LineageTracker,
+)
+from prospector_interno.domain.catalog.specifications import (
+    AssetSpecification,
+    BaseAssetSpecification,
 )
 from prospector_interno.domain.contracts.lineage_spec import (
     AssetLineageGraphResponse,
@@ -36,6 +43,7 @@ _default_lineage_adapter = SqliteLineageAdapter(
     Path("data/catalog/datax_catalog.db")
 )
 _lineage_tracker = LineageTracker(_default_lineage_adapter)
+_catalog_service = AssetCatalogService(_default_lineage_adapter)
 
 
 def get_lineage_tracker() -> LineageTracker:
@@ -45,11 +53,24 @@ def get_lineage_tracker() -> LineageTracker:
 
 def set_lineage_tracker(tracker: LineageTracker) -> None:
     """Sobrescribe la instancia activa de LineageTracker (útil para tests)."""
-    global _lineage_tracker
+    global _lineage_tracker, _catalog_service
     _lineage_tracker = tracker
+    _catalog_service = AssetCatalogService(tracker._repository)
+
+
+def get_asset_catalog_service() -> AssetCatalogService:
+    """Obtiene la instancia activa del servicio de catálogo técnico."""
+    return _catalog_service
+
+
+def set_asset_catalog_service(service: AssetCatalogService) -> None:
+    """Sobrescribe la instancia activa de AssetCatalogService (útil para tests)."""
+    global _catalog_service
+    _catalog_service = service
 
 
 @router.get(
+
 
     "/stats",
     response_model=CatalogStatsResponse,
@@ -241,14 +262,83 @@ def list_catalog_assets(
     ),
 ) -> list[InternalAssetRecord]:
     """Retorna los activos registrados en el catálogo relacional."""
-    tracker = get_lineage_tracker()
-    return tracker._repository.list_assets(
-        storage_layer=storage_layer,
-        source_id=source_id,
-    )
+    service = get_asset_catalog_service()
+    spec: BaseAssetSpecification = AssetSpecification.all()
+    if storage_layer:
+        spec = spec.by_layer(storage_layer)
+    if source_id:
+        spec = spec.by_source(source_id)
+    return service.find_assets(spec)
 
 
 @router.get(
+    "/assets/search",
+    response_model=list[InternalAssetRecord],
+    summary="Búsqueda avanzada de activos con Specification Pattern (HUI-15)",
+    description=(
+        "Permite componer filtros dinámicos por fuente, dataset, capa, "
+        "rango temporal y mínimo de filas sobre el inventario técnico."
+    ),
+)
+def search_catalog_assets(
+    source_id: str | None = Query(
+        default=None,
+        description="Código de la fuente emisora (ej: 'finrural')",
+    ),
+    dataset_id: str | None = Query(
+        default=None,
+        description="Código del conjunto de datos (ej: 'mart_cartera')",
+    ),
+    storage_layer: str | None = Query(
+        default=None,
+        description="Capa Medallion (BRONZE, SILVER, GOLD)",
+    ),
+    start_date: str | None = Query(
+        default=None,
+        description="Fecha inicial del periodo (YYYY-MM-DD)",
+    ),
+    end_date: str | None = Query(
+        default=None,
+        description="Fecha final del periodo (YYYY-MM-DD)",
+    ),
+    min_rows: int | None = Query(
+        default=None,
+        ge=0,
+        description="Cantidad mínima de filas requeridas",
+    ),
+) -> list[InternalAssetRecord]:
+    """Ejecuta una búsqueda componible mediante el Specification Pattern."""
+    spec: BaseAssetSpecification = AssetSpecification.all()
+
+    if source_id:
+        spec = spec.by_source(source_id)
+    if dataset_id:
+        spec = spec.by_dataset(dataset_id)
+    if storage_layer:
+        spec = spec.by_layer(storage_layer)
+    if start_date and end_date:
+        spec = spec.in_range(start_date, end_date)
+    if min_rows is not None:
+        spec = spec.with_min_rows(min_rows)
+
+    service = get_asset_catalog_service()
+    return service.find_assets(spec)
+
+
+@router.get(
+    "/assets/summary",
+    response_model=dict[str, Any],
+    summary="Resumen ejecutivo del inventario de activos catalogados (HUI-15)",
+    description="Retorna métricas de volumen, distribución por capas y fuentes.",
+)
+def get_inventory_summary() -> dict[str, Any]:
+    """Calcula el resumen agregado del inventario técnico."""
+    service = get_asset_catalog_service()
+    return service.get_inventory_summary()
+
+
+@router.get(
+
     "/assets/{asset_id}/lineage",
     response_model=AssetLineageGraphResponse,
     summary="Consultar grafo de linaje y cadena de custodia (HUI-17)",

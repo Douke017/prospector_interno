@@ -6,9 +6,11 @@ definida en la Sección 14.1 de la arquitectura (internal_assets y data_lineage)
 
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 import sqlite3
 import threading
+
 
 from prospector_interno.domain.contracts.lineage_spec import (
     DataLineageRecord,
@@ -169,7 +171,32 @@ class SqliteLineageAdapter(LineageRepositoryPort):
             cur.close()
             return [self._row_to_asset(r) for r in rows]
 
+    def find_by_specification(
+        self,
+        specification: Any,
+    ) -> list[InternalAssetRecord]:
+        """Recupera activos evaluando una especificación componible (HUI-15)."""
+        if hasattr(specification, "to_sql_criteria"):
+            sql_criteria, params = specification.to_sql_criteria()
+            query = (
+                f"SELECT * FROM internal_assets WHERE {sql_criteria} "
+                f"ORDER BY period_start DESC, asset_id ASC;"
+            )
+            with self._lock:
+                cur = self._conn.cursor()
+                cur.execute(query, params)
+                rows = cur.fetchall()
+                cur.close()
+                return [self._row_to_asset(r) for r in rows]
+
+        all_assets = self.list_assets()
+        return [
+            a for a in all_assets
+            if getattr(specification, "is_satisfied_by", lambda _: True)(a)
+        ]
+
     def record_lineage(self, lineage: DataLineageRecord) -> None:
+
         """Inserta un enlace inmutable de linaje entre Gold y Bronze."""
         with self._lock:
             cur = self._conn.cursor()

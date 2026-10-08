@@ -9,6 +9,9 @@ from urllib.parse import urlparse
 import uuid
 
 from prospector_interno.application.gatekeeper import PreFlightGatekeeper
+from prospector_interno.domain.contracts.downloader_spec import (
+    OffPeakEvaluationRequest,
+)
 from prospector_interno.domain.models import (
     IngestionRequest,
     PreFlightVerdict,
@@ -21,6 +24,7 @@ from prospector_interno.domain.models import (
 from prospector_interno.domain.ports import (
     BronzeStoragePort,
     HttpDownloaderPort,
+    OffPeakWindowGuardPort,
     SyncOrchestratorPort,
 )
 
@@ -33,15 +37,18 @@ class SyncOrchestrator(SyncOrchestratorPort):
         gatekeeper: PreFlightGatekeeper,
         storage: BronzeStoragePort,
         downloader: HttpDownloaderPort,
+        window_guard: OffPeakWindowGuardPort | None = None,
     ) -> None:
         self._gatekeeper = gatekeeper
         self._storage = storage
         self._downloader = downloader
+        self._window_guard = window_guard
 
     def create_plan(
         self,
         diff_report: ReconciliationDiffReport,
     ) -> SyncPlan:
+
         """Construye un SyncPlan ordenando descargas por prioridad temporal."""
         plan_id = f"plan_{uuid.uuid4().hex[:8]}"
         items_to_sync: list[SyncPlanItem] = []
@@ -102,13 +109,40 @@ class SyncOrchestrator(SyncOrchestratorPort):
             is_executed=False,
         )
 
-    def execute_plan(self, plan: SyncPlan) -> SyncPlan:
+    def execute_plan(self, plan: SyncPlan, force_now: bool = False) -> SyncPlan:
         """Ejecuta ordenadamente las tareas del plan depositándolas en Bronze."""
+        if self._window_guard is not None:
+            eval_req = OffPeakEvaluationRequest(
+                batch_size=len(plan.items),
+                force_now=force_now,
+                source_id=plan.source_id,
+            )
+            eval_res = self._window_guard.evaluate_batch(eval_req)
+            if not eval_res.is_permitted:
+                paused_items = [
+                    item.model_copy(
+                        update={
+                            "status": "PAUSED_WAITING_OFFPEAK",
+                            "error_message": eval_res.reason,
+                        }
+                    )
+                    for item in plan.items
+                ]
+                return plan.model_copy(
+                    update={
+                        "items": paused_items,
+                        "completed_tasks": 0,
+                        "failed_tasks": 0,
+                        "is_executed": False,
+                    }
+                )
+
         executed_items: list[SyncPlanItem] = []
         completed_count = 0
         failed_count = 0
 
         for item in plan.items:
+
             req = IngestionRequest(
                 request_id=item.item_id,
                 dataset_code=f"DS_BO_{item.source_id.upper()}",

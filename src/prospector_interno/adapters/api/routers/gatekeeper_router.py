@@ -14,11 +14,15 @@ from prospector_interno.adapters.api.schemas import (
     IngestionEvaluateResponse,
 )
 from prospector_interno.adapters.memory_state import InMemoryGatekeeperState
+from prospector_interno.adapters.resilience.bulkhead_manager import (
+    get_bulkhead_manager,
+)
 from prospector_interno.adapters.storage.local_bronze import LocalBronzeStorage
 from prospector_interno.adapters.storage.sqlite_download_tracking import (
     SqliteDownloadTrackingAdapter,
 )
 from prospector_interno.application.gatekeeper import PreFlightGatekeeper
+from prospector_interno.domain.contracts.bulkhead_spec import BulkheadStats
 from prospector_interno.domain.contracts.derivation_spec import (
     DerivationEvaluationRequest,
     DerivationEvaluationResult,
@@ -109,7 +113,8 @@ def evaluate_ingestion(
         force_refresh=request.force_refresh,
     )
 
-    evaluation = _gatekeeper.evaluate(domain_request)
+    bulkhead = get_bulkhead_manager()
+    evaluation = bulkhead.execute_gatekeeper(_gatekeeper.evaluate, domain_request)
 
     cached_id = (
         evaluation.cached_artifact.artifact_id
@@ -145,5 +150,17 @@ def evaluate_ingestion(
 def inspect_derivation(
     request: DerivationEvaluationRequest,
 ) -> DerivationEvaluationResult:
-    """Inspecciona la cobertura de particiones para derivación temporal."""
-    return _derivation_filter.evaluate(request)
+    """Inspecciona la cobertura de particiones aislada en pool Gatekeeper (HUI-23)."""
+    bulkhead = get_bulkhead_manager()
+    return bulkhead.execute_gatekeeper(_derivation_filter.evaluate, request)
+
+
+@router.get(
+    "/bulkhead/stats",
+    response_model=BulkheadStats,
+    summary="Métricas de aislamiento de hilos y memoria (HUI-23)",
+    description="Retorna el estado de los pools de workers y presupuesto de RAM.",
+)
+def get_bulkhead_metrics() -> BulkheadStats:
+    """Retorna métricas del pool Bulkhead en tiempo real."""
+    return get_bulkhead_manager().get_stats()

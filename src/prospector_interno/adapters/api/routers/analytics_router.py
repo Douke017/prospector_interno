@@ -7,6 +7,9 @@ from fastapi import APIRouter, HTTPException
 from prospector_interno.adapters.analytics.duckdb_analytics_adapter import (
     DuckDBAnalyticsAdapter,
 )
+from prospector_interno.adapters.resilience.bulkhead_manager import (
+    get_bulkhead_manager,
+)
 from prospector_interno.adapters.storage.local_bronze import LocalBronzeStorage
 from prospector_interno.application.analytics.views_service import (
     PredefinedViewsService,
@@ -47,8 +50,9 @@ _views_service = PredefinedViewsService(base_gold_path=Path("data/gold"))
     ),
 )
 def query_gold_mart(request: AnalyticsQueryRequest) -> AnalyticsQueryResponse:
-    """Ejecuta consulta analítica sobre la Capa Gold."""
-    return _analytics_adapter.execute_query(request)
+    """Ejecuta consulta analítica aislada en pool Bulkhead (HUI-23)."""
+    bulkhead = get_bulkhead_manager()
+    return bulkhead.execute_analytics(_analytics_adapter.execute_query, request)
 
 
 @router.get(
@@ -60,7 +64,8 @@ def get_gold_dimensions(
     datamart: str = "mart_cartera",
 ) -> dict[str, list[Any]]:
     """Consulta las dimensiones disponibles en el datamart."""
-    return _analytics_adapter.get_dimensions(datamart)
+    bulkhead = get_bulkhead_manager()
+    return bulkhead.execute_analytics(_analytics_adapter.get_dimensions, datamart)
 
 
 @router.get(
@@ -109,9 +114,12 @@ def execute_predefined_view(
     view_id: str,
     request: PredefinedViewQueryRequest | None = None,
 ) -> PredefinedViewResult:
-    """Ejecuta la vista analítica solicitada."""
+    """Ejecuta la vista analítica solicitada aislada en pool Bulkhead."""
     try:
-        return _views_service.execute_view(view_id, request=request)
+        bulkhead = get_bulkhead_manager()
+        return bulkhead.execute_analytics(
+            _views_service.execute_view, view_id, request=request
+        )
     except ViewNotFoundError as err:
         raise HTTPException(status_code=404, detail=str(err)) from err
 

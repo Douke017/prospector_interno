@@ -4,6 +4,11 @@ from prospector_interno.domain.contracts.analytics_spec import (
     AnalyticsQueryRequest,
     AnalyticsQueryResponse,
 )
+from prospector_interno.domain.contracts.bulkhead_spec import (
+    BulkheadConfig,
+    BulkheadPoolType,
+    BulkheadStats,
+)
 from prospector_interno.domain.contracts.derivation_spec import (
     DerivationEvaluationRequest,
     DerivationEvaluationResult,
@@ -39,6 +44,10 @@ from prospector_interno.domain.contracts.semantic_spec import (
     MetricDataType,
     SemanticDictionaryResponse,
 )
+from prospector_interno.domain.contracts.search_spec import (
+    UnifiedSearchDocument,
+    UnifiedSearchIndexResponse,
+)
 from prospector_interno.domain.contracts.silver_spec import (
     AccountCategory,
     SilverFinancialRecord,
@@ -55,6 +64,9 @@ __all__ = [
     "AnalyticsQueryRequest",
     "AnalyticsQueryResponse",
     "AssetLineageGraphResponse",
+    "BulkheadConfig",
+    "BulkheadPoolType",
+    "BulkheadStats",
     "CircuitState",
     "DataLineageRecord",
     "DerivationEvaluationRequest",
@@ -73,7 +85,6 @@ __all__ = [
     "MetricDataType",
     "PeriodBreakdown",
     "PredefinedViewMetadata",
-
     "PredefinedViewQueryRequest",
     "PredefinedViewResult",
     "ProvenanceStep",
@@ -82,4 +93,6 @@ __all__ = [
     "SilverFinancialRecord",
     "StatementType",
     "StorageLayer",
+    "UnifiedSearchDocument",
+    "UnifiedSearchIndexResponse",
 ]

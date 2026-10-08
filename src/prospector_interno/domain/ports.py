@@ -1,17 +1,27 @@
 """Puertos del dominio (Interfaces abstractas) para Arquitectura Hexagonal."""
 
 from abc import ABC, abstractmethod
+from collections.abc import Callable
+from datetime import datetime
 from pathlib import Path
-from typing import BinaryIO
+from typing import Any, BinaryIO
 
+from prospector_interno.domain.contracts.bulkhead_spec import (
+    BulkheadStats,
+)
 from prospector_interno.domain.contracts.download_lifecycle_spec import (
     DownloadLifecycleStatus,
     DownloadRecord,
+)
+from prospector_interno.domain.contracts.downloader_spec import (
+    OffPeakEvaluationRequest,
+    OffPeakEvaluationResult,
 )
 from prospector_interno.domain.contracts.lineage_spec import (
     DataLineageRecord,
     InternalAssetRecord,
 )
+
 from prospector_interno.domain.models import (
     BronzeArtifact,
     DatasetSpecification,
@@ -182,11 +192,12 @@ class SyncOrchestratorPort(ABC):
         """Construye un SyncPlan priorizado a partir del reporte de diff."""
 
     @abstractmethod
-    def execute_plan(self, plan: SyncPlan) -> SyncPlan:
+    def execute_plan(self, plan: SyncPlan, force_now: bool = False) -> SyncPlan:
         """Ejecuta las descargas del plan depositándolas en Capa Bronze."""
 
 
 class CircuitBreakerPort(ABC):
+
     """Puerto para el disyuntor adaptativo por dominio (HUI-09)."""
 
     @abstractmethod
@@ -249,7 +260,15 @@ class LineageRepositoryPort(ABC):
         """Lista activos catalogados con filtros opcionales."""
 
     @abstractmethod
+    def find_by_specification(
+        self,
+        specification: Any,
+    ) -> list[InternalAssetRecord]:
+        """Recupera activos evaluando una especificación componible (HUI-15)."""
+
+    @abstractmethod
     def record_lineage(self, lineage: DataLineageRecord) -> None:
+
         """Inserta un enlace inmutable de linaje entre Gold y Bronze."""
 
     @abstractmethod
@@ -322,3 +341,102 @@ class DownloadTrackingPort(ABC):
     @abstractmethod
     def list_active_downloads(self) -> list[DownloadRecord]:
         """Lista todas las descargas en cola (PENDING) o activas (DOWNLOADING)."""
+
+
+class BrowserTransportPort(ABC):
+    """Puerto para el transporte de red con huella de navegador y HTTP/2 (HUI-07)."""
+
+    @abstractmethod
+    def get_default_headers(self) -> dict[str, str]:
+        """Retorna las cabeceras canónicas de emulación de navegador real."""
+
+    @abstractmethod
+    def create_client(
+        self,
+        timeout_seconds: float = 30.0,
+        headers: dict[str, str] | None = None,
+        follow_redirects: bool = True,
+    ) -> Any:
+        """Crea un cliente HTTP síncrono con pool de conexiones y HTTP/2."""
+
+    @abstractmethod
+    def create_async_client(
+        self,
+        timeout_seconds: float = 30.0,
+        headers: dict[str, str] | None = None,
+        follow_redirects: bool = True,
+    ) -> Any:
+        """Crea un cliente HTTP asíncrono con pool de conexiones y HTTP/2."""
+
+
+class OffPeakWindowGuardPort(ABC):
+    """Puerto para la guardia de ventanas horarias valle (HUI-10)."""
+
+    @abstractmethod
+    def evaluate_batch(
+        self,
+        request: OffPeakEvaluationRequest,
+    ) -> OffPeakEvaluationResult:
+        """Evalúa si un lote de descargas masivas puede proceder o debe pausarse."""
+
+    @abstractmethod
+    def is_in_offpeak_window(
+        self,
+        at_time: datetime | None = None,
+    ) -> bool:
+        """Determina si la hora dada está en ventana valle (23:00 - 06:00 UTC-4)."""
+
+    @abstractmethod
+    def calculate_seconds_to_next_window(
+        self,
+        at_time: datetime | None = None,
+    ) -> float:
+        """Calcula los segundos restantes hasta la próxima ventana valle."""
+
+
+class BulkheadExecutorPort(ABC):
+    """Puerto para aislamiento de cargas de trabajo (Bulkhead Pattern, HUI-23)."""
+
+    @abstractmethod
+    def execute_gatekeeper(
+        self,
+        func: Callable[..., Any],
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        """Ejecuta una tarea de pre-vuelo en el pool aislado de Gatekeeper."""
+
+    @abstractmethod
+    async def execute_gatekeeper_async(
+        self,
+        func: Callable[..., Any],
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        """Ejecuta asíncronamente en el pool aislado de Gatekeeper."""
+
+    @abstractmethod
+    def execute_analytics(
+        self,
+        func: Callable[..., Any],
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        """Ejecuta una consulta pesada en el pool analítico de DuckDB."""
+
+    @abstractmethod
+    async def execute_analytics_async(
+        self,
+        func: Callable[..., Any],
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        """Ejecuta asíncronamente en el pool analítico de DuckDB."""
+
+    @abstractmethod
+    def get_stats(self) -> BulkheadStats:
+        """Retorna estadísticas operativas de los pools de ejecución."""
+
+    @abstractmethod
+    def shutdown(self, wait: bool = True) -> None:
+        """Finaliza los pools de ejecución de forma segura."""
