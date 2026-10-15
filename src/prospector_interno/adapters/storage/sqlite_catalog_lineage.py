@@ -17,11 +17,19 @@ from prospector_interno.domain.contracts.lineage_spec import (
     InternalAssetRecord,
     StorageLayer,
 )
-from prospector_interno.domain.ports import LineageRepositoryPort
+from prospector_interno.domain.models import (
+    DatasetSpecification,
+    Periodicity,
+    SourceDefinition,
+)
+from prospector_interno.domain.ports import (
+    CatalogRepositoryPort,
+    LineageRepositoryPort,
+)
 
 
-class SqliteLineageAdapter(LineageRepositoryPort):
-    """Repositorio relacional liviano para inventario de activos y grafo de linaje."""
+class SqliteLineageAdapter(LineageRepositoryPort, CatalogRepositoryPort):
+    """Repositorio relacional para inventario de activos, linaje y catálogo canónico."""
 
     def __init__(self, db_path: str | Path = ":memory:") -> None:
         self._db_path = str(db_path)
@@ -88,8 +96,37 @@ class SqliteLineageAdapter(LineageRepositoryPort):
                 "ON internal_assets(storage_layer);"
             )
             cur.execute(
-                "CREATE INDEX IF NOT EXISTS idx_assets_source "
-                "ON internal_assets(source_id);"
+                """
+                CREATE TABLE IF NOT EXISTS canonical_sources (
+                    source_id INTEGER PRIMARY KEY,
+                    canonical_code TEXT NOT NULL UNIQUE,
+                    official_name TEXT NOT NULL,
+                    short_name TEXT NOT NULL,
+                    homepage TEXT,
+                    country_iso TEXT NOT NULL,
+                    is_active BOOLEAN NOT NULL,
+                    notes TEXT
+                );
+                """
+            )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS canonical_datasets (
+                    dataset_code TEXT PRIMARY KEY,
+                    source_id INTEGER NOT NULL,
+                    legacy_file_code TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    periodicity TEXT NOT NULL,
+                    url_template TEXT NOT NULL,
+                    expected_format TEXT NOT NULL,
+                    is_active BOOLEAN NOT NULL,
+                    FOREIGN KEY (source_id) REFERENCES canonical_sources(source_id)
+                );
+                """
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_canonical_datasets_src "
+                "ON canonical_datasets(source_id);"
             )
             cur.close()
 
@@ -293,3 +330,227 @@ class SqliteLineageAdapter(LineageRepositoryPort):
             pipeline_version=row["pipeline_version"],
             transformed_at=datetime.fromisoformat(row["transformed_at"]),
         )
+
+    def save_source(self, source: SourceDefinition) -> None:
+        """Registra o actualiza una fuente emisora en el catálogo canónico."""
+        with self._lock:
+            cur = self._conn.cursor()
+            cur.execute(
+                """
+                INSERT INTO canonical_sources (
+                    source_id, canonical_code, official_name, short_name,
+                    homepage, country_iso, is_active, notes
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(source_id) DO UPDATE SET
+                    canonical_code=excluded.canonical_code,
+                    official_name=excluded.official_name,
+                    short_name=excluded.short_name,
+                    homepage=excluded.homepage,
+                    country_iso=excluded.country_iso,
+                    is_active=excluded.is_active,
+                    notes=excluded.notes;
+                """,
+                (
+                    source.source_id,
+                    source.canonical_code,
+                    source.official_name,
+                    source.short_name,
+                    source.homepage,
+                    source.country_iso,
+                    source.is_active,
+                    source.notes,
+                ),
+            )
+            cur.close()
+
+    def get_source_by_id(self, source_id: int) -> SourceDefinition | None:
+        """Recupera una fuente emisora por su identificador primario."""
+        with self._lock:
+            cur = self._conn.cursor()
+            cur.execute(
+                "SELECT * FROM canonical_sources WHERE source_id = ?;",
+                (source_id,),
+            )
+            row = cur.fetchone()
+            cur.close()
+            if not row:
+                return None
+            return SourceDefinition(
+                source_id=row["source_id"],
+                canonical_code=row["canonical_code"],
+                official_name=row["official_name"],
+                short_name=row["short_name"],
+                homepage=row["homepage"],
+                country_iso=row["country_iso"],
+                is_active=bool(row["is_active"]),
+                notes=row["notes"],
+            )
+
+    def get_source_by_code(
+        self,
+        canonical_code: str,
+    ) -> SourceDefinition | None:
+        """Recupera una fuente por su código canónico (ej. 'BO_BCB')."""
+        with self._lock:
+            cur = self._conn.cursor()
+            cur.execute(
+                "SELECT * FROM canonical_sources "
+                "WHERE UPPER(canonical_code) = UPPER(?);",
+                (canonical_code,),
+            )
+            row = cur.fetchone()
+            cur.close()
+            if not row:
+                return None
+            return SourceDefinition(
+                source_id=row["source_id"],
+                canonical_code=row["canonical_code"],
+                official_name=row["official_name"],
+                short_name=row["short_name"],
+                homepage=row["homepage"],
+                country_iso=row["country_iso"],
+                is_active=bool(row["is_active"]),
+                notes=row["notes"],
+            )
+
+    def list_sources(self) -> list[SourceDefinition]:
+        """Lista todas las fuentes registradas en el catálogo."""
+        with self._lock:
+            cur = self._conn.cursor()
+            cur.execute("SELECT * FROM canonical_sources ORDER BY source_id;")
+            rows = cur.fetchall()
+            cur.close()
+            return [
+                SourceDefinition(
+                    source_id=r["source_id"],
+                    canonical_code=r["canonical_code"],
+                    official_name=r["official_name"],
+                    short_name=r["short_name"],
+                    homepage=r["homepage"],
+                    country_iso=r["country_iso"],
+                    is_active=bool(r["is_active"]),
+                    notes=r["notes"],
+                )
+                for r in rows
+            ]
+
+    def save_dataset(self, dataset: DatasetSpecification) -> None:
+        """Registra o actualiza una especificación de dataset canónico."""
+        with self._lock:
+            cur = self._conn.cursor()
+            periodicity_val = (
+                dataset.periodicity.value
+                if hasattr(dataset.periodicity, "value")
+                else str(dataset.periodicity)
+            )
+            cur.execute(
+                """
+                INSERT INTO canonical_datasets (
+                    dataset_code, source_id, legacy_file_code, name,
+                    periodicity, url_template, expected_format, is_active
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(dataset_code) DO UPDATE SET
+                    source_id=excluded.source_id,
+                    legacy_file_code=excluded.legacy_file_code,
+                    name=excluded.name,
+                    periodicity=excluded.periodicity,
+                    url_template=excluded.url_template,
+                    expected_format=excluded.expected_format,
+                    is_active=excluded.is_active;
+                """,
+                (
+                    dataset.dataset_code,
+                    dataset.source_id,
+                    dataset.legacy_file_code,
+                    dataset.name,
+                    periodicity_val,
+                    dataset.url_template,
+                    dataset.expected_format,
+                    dataset.is_active,
+                ),
+            )
+            cur.close()
+
+    def get_dataset(self, dataset_code: str) -> DatasetSpecification | None:
+        """Recupera la especificación técnica de un dataset por su código."""
+        with self._lock:
+            cur = self._conn.cursor()
+            cur.execute(
+                "SELECT * FROM canonical_datasets "
+                "WHERE UPPER(dataset_code) = UPPER(?);",
+                (dataset_code,),
+            )
+            row = cur.fetchone()
+            cur.close()
+            if not row:
+                return None
+            return DatasetSpecification(
+                dataset_code=row["dataset_code"],
+                source_id=row["source_id"],
+                legacy_file_code=row["legacy_file_code"],
+                name=row["name"],
+                periodicity=Periodicity(row["periodicity"]),
+                url_template=row["url_template"],
+                expected_format=row["expected_format"],
+                is_active=bool(row["is_active"]),
+            )
+
+    def list_datasets(
+        self,
+        source_id: int | None = None,
+    ) -> list[DatasetSpecification]:
+        """Lista las especificaciones de datasets, opcionalmente por fuente."""
+        with self._lock:
+            cur = self._conn.cursor()
+            if source_id is not None:
+                cur.execute(
+                    "SELECT * FROM canonical_datasets "
+                    "WHERE source_id = ? ORDER BY dataset_code;",
+                    (source_id,),
+                )
+            else:
+                cur.execute(
+                    "SELECT * FROM canonical_datasets ORDER BY dataset_code;"
+                )
+            rows = cur.fetchall()
+            cur.close()
+            return [
+                DatasetSpecification(
+                    dataset_code=r["dataset_code"],
+                    source_id=r["source_id"],
+                    legacy_file_code=r["legacy_file_code"],
+                    name=r["name"],
+                    periodicity=Periodicity(r["periodicity"]),
+                    url_template=r["url_template"],
+                    expected_format=r["expected_format"],
+                    is_active=bool(r["is_active"]),
+                )
+                for r in rows
+            ]
+
+    def get_dataset_by_legacy_code(
+        self,
+        legacy_file_code: str,
+    ) -> DatasetSpecification | None:
+        """Recupera la especificación técnica por su código de archivo legacy."""
+        with self._lock:
+            cur = self._conn.cursor()
+            cur.execute(
+                "SELECT * FROM canonical_datasets "
+                "WHERE UPPER(legacy_file_code) = UPPER(?);",
+                (legacy_file_code,),
+            )
+            row = cur.fetchone()
+            cur.close()
+            if not row:
+                return None
+            return DatasetSpecification(
+                dataset_code=row["dataset_code"],
+                source_id=row["source_id"],
+                legacy_file_code=row["legacy_file_code"],
+                name=row["name"],
+                periodicity=Periodicity(row["periodicity"]),
+                url_template=row["url_template"],
+                expected_format=row["expected_format"],
+                is_active=bool(row["is_active"]),
+            )

@@ -5,12 +5,14 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query
 
 import psycopg
-from psycopg.rows import dict_row
 
 from prospector_interno.adapters.api.schemas import (
     CatalogStatsResponse,
     DatasetResponse,
     SourceResponse,
+)
+from prospector_interno.adapters.storage.db_connection import (
+    get_readonly_connection,
 )
 from prospector_interno.adapters.storage.sqlite_catalog_lineage import (
     SqliteLineageAdapter,
@@ -34,10 +36,72 @@ from prospector_interno.domain.exceptions import EntityNotFoundError
 
 router = APIRouter(prefix="/catalog", tags=["1. Catálogo Portal Nexus"])
 
-DB_CONN = (
-    "host=localhost port=5434 dbname=platform_db "
-    "user=postgres password=postgres"
-)
+CATALOG_VIEW_CTE = """(
+    WITH deduplicated_file AS (
+        SELECT DISTINCT ON (file.code) file.id_file,
+            file.id_source,
+            file.code,
+            file.name,
+            file.specific_url,
+            file.main_url,
+            file.publication_frequency,
+            file.type,
+            file.creation_date,
+            file.state
+        FROM file
+        WHERE ((file.code IS NOT NULL) AND (TRIM(BOTH FROM file.code) <> ''))
+        ORDER BY file.code, file.id_file DESC
+    )
+    SELECT s.id_source,
+        s.short_name AS source_code,
+        s.name AS source_name,
+        CASE
+            WHEN (TRIM(BOTH FROM s.homepage) = ANY (
+                ARRAY['vacio', 'no-data', '']
+            )) THEN NULL
+            ELSE TRIM(BOTH FROM s.homepage)
+        END AS source_homepage,
+        f.id_file,
+        f.code AS legacy_file_code,
+        'DS_BO_' || upper(
+            regexp_replace(s.short_name, '[^A-Za-z0-9]+', '_', 'g')
+        ) || '_' || upper(
+            regexp_replace(f.code, '[^A-Za-z0-9]+', '_', 'g')
+        ) AS canonical_dataset_code,
+        f.name AS dataset_name,
+        f.publication_frequency,
+        COALESCE(
+            NULLIF(TRIM(BOTH FROM f.specific_url), ''),
+            NULLIF(TRIM(BOTH FROM f.main_url), '')
+        ) AS target_url,
+        f.type AS format_type,
+        f.creation_date,
+        max(d.download_date) AS last_download_date,
+        max(d.download_hash) AS last_known_hash,
+        count(d.id_download) AS total_historical_downloads
+    FROM source s
+    JOIN deduplicated_file f ON s.id_source = f.id_source
+    LEFT JOIN download d ON f.id_file = d.id_file
+    GROUP BY
+        s.id_source, s.short_name, s.name, s.homepage,
+        f.id_file, f.code, f.name, f.publication_frequency,
+        f.specific_url, f.main_url, f.type, f.creation_date
+)"""
+
+
+def _get_catalog_source(conn: psycopg.Connection, alias: str = "") -> str:
+    """Retorna la tabla o CTE canónica del catálogo con alias opcional."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT 1 FROM pg_matviews WHERE matviewname = 'mv_nexus_active_catalog';"
+        )
+        has_mv = cur.fetchone() is not None
+
+    table_name = "mv_nexus_active_catalog" if has_mv else CATALOG_VIEW_CTE
+    if alias:
+        return f"{table_name} AS {alias}" if not has_mv else f"{table_name} {alias}"
+    return table_name if has_mv else f"{table_name} AS mv_nexus_active_catalog"
+
 
 _default_lineage_adapter = SqliteLineageAdapter(
     Path("data/catalog/datax_catalog.db")
@@ -70,25 +134,27 @@ def set_asset_catalog_service(service: AssetCatalogService) -> None:
 
 
 @router.get(
-
-
     "/stats",
     response_model=CatalogStatsResponse,
     summary="Obtener métricas consolidadas del catálogo",
     description="Retorna conteo de fuentes, datasets y descargas en la MV.",
 )
 def get_catalog_stats() -> CatalogStatsResponse:
-    """Consulta las estadísticas pre-agregadas en la Vista Materializada."""
+    """Consulta las estadísticas pre-agregadas en la Vista Materializada o CTE."""
     try:
-        with psycopg.connect(DB_CONN, row_factory=dict_row) as conn:
+        with get_readonly_connection() as conn:
             with conn.cursor() as cur:
+                catalog_src = _get_catalog_source(conn, "m")
                 cur.execute(
-                    """
+                    f"""
                     SELECT
-                        COUNT(DISTINCT source_code) AS total_sources,
+                        COUNT(DISTINCT m.source_code) AS total_sources,
                         COUNT(*) AS total_datasets,
-                        COALESCE(SUM(total_historical_downloads), 0) AS total_downloads
-                    FROM mv_nexus_active_catalog;
+                        COALESCE(
+                            SUM(m.total_historical_downloads), 0
+                        ) AS total_downloads
+                    FROM {catalog_src};
+
                     """
                 )
                 row = cur.fetchone()
@@ -121,10 +187,11 @@ def get_catalog_stats() -> CatalogStatsResponse:
 def list_active_sources() -> list[SourceResponse]:
     """Retorna las instituciones emisoras que tienen series y datos vigentes."""
     try:
-        with psycopg.connect(DB_CONN, row_factory=dict_row) as conn:
+        with get_readonly_connection() as conn:
             with conn.cursor() as cur:
+                catalog_src = _get_catalog_source(conn, "m")
                 cur.execute(
-                    """
+                    f"""
                     SELECT
                         s.id_source,
                         'BO_' || UPPER(s.short_name) AS canonical_code,
@@ -136,7 +203,7 @@ def list_active_sources() -> list[SourceResponse]:
                         END AS homepage,
                         COUNT(m.canonical_dataset_code) AS total_active_datasets
                     FROM source s
-                    INNER JOIN mv_nexus_active_catalog m ON s.id_source = m.id_source
+                    INNER JOIN {catalog_src} ON s.id_source = m.id_source
                     GROUP BY s.id_source, s.short_name, s.name, s.homepage
                     ORDER BY total_active_datasets DESC;
                     """
@@ -181,46 +248,51 @@ def search_datasets(
     limit: int = Query(default=20, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
 ) -> list[DatasetResponse]:
-    """Busca series canónicas en la vista materializada indexada."""
-    query = """
-        SELECT
-            canonical_dataset_code,
-            source_code,
-            source_name,
-            dataset_name,
-            publication_frequency,
-            target_url,
-            format_type,
-            last_download_date::text AS last_download_date,
-            last_known_hash,
-            total_historical_downloads
-        FROM mv_nexus_active_catalog
-        WHERE 1=1
-    """
+    """Busca series canónicas en la vista materializada indexada o CTE."""
     params: list[Any] = []
-
-    if source_code:
-        query += " AND UPPER(source_code) = UPPER(%s)"
-        params.append(source_code)
-
-    if q:
-        query += " AND (dataset_name ILIKE %s OR canonical_dataset_code ILIKE %s)"
-        like_term = f"%{q}%"
-        params.extend([like_term, like_term])
-
-    query += (
-        " ORDER BY total_historical_downloads DESC, canonical_dataset_code "
-        "LIMIT %s OFFSET %s"
-    )
-    params.extend([limit, offset])
-
     try:
-        with psycopg.connect(DB_CONN, row_factory=dict_row) as conn:
+        with get_readonly_connection() as conn:
             with conn.cursor() as cur:
+                catalog_src = _get_catalog_source(conn, "m")
+                query = f"""
+                    SELECT
+                        m.canonical_dataset_code,
+                        m.source_code,
+                        m.source_name,
+                        m.dataset_name,
+                        m.publication_frequency,
+                        m.target_url,
+                        m.format_type,
+                        m.last_download_date::text AS last_download_date,
+                        m.last_known_hash,
+                        m.total_historical_downloads
+                    FROM {catalog_src}
+                    WHERE 1=1
+                """
+
+                if source_code:
+                    query += " AND UPPER(m.source_code) = UPPER(%s)"
+                    params.append(source_code)
+
+                if q:
+                    query += (
+                        " AND (m.dataset_name ILIKE %s OR "
+                        "m.canonical_dataset_code ILIKE %s)"
+                    )
+                    like_term = f"%{q}%"
+                    params.extend([like_term, like_term])
+
+                query += (
+                    " ORDER BY m.total_historical_downloads DESC, "
+                    "m.canonical_dataset_code LIMIT %s OFFSET %s"
+                )
+                params.extend([limit, offset])
+
                 cur.execute(query, params)
                 rows = cur.fetchall()
 
                 return [
+
                     DatasetResponse(
                         canonical_dataset_code=r["canonical_dataset_code"],
                         source_code=r["source_code"],

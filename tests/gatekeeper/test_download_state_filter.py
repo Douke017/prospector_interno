@@ -108,6 +108,12 @@ class MockDownloadTrackingAdapter(DownloadTrackingPort):
             in (DownloadLifecycleStatus.DOWNLOADING, DownloadLifecycleStatus.PENDING)
         ]
 
+    def find_by_checksum(self, sha256_checksum: str) -> DownloadRecord | None:
+        for r in self.records.values():
+            if r.sha256_checksum == sha256_checksum:
+                return r
+        return None
+
 
 class MockBronzeStorage(BronzeStoragePort):
     """Mock simplificado de BronzeStoragePort."""

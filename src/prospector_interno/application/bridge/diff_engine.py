@@ -41,6 +41,22 @@ class DuckDBDiffEngine(ReconciliationEnginePort):
         self._storage = storage
         self._external_client = external_client or HttpExternalCatalogClient()
 
+    def _resolve_map_path(self, path: Path | str) -> Path | None:
+        """Resuelve rutas relativas o absolutas de mapas externos de forma resiliente."""
+        p = Path(path)
+        if p.exists():
+            return p
+        raw_str = str(path)
+        if "../" in raw_str:
+            clean_p = Path(raw_str.replace("../", ""))
+            if clean_p.exists():
+                return clean_p
+        repo_root = Path("/home/douke017/Datax")
+        candidate = repo_root / raw_str.lstrip("./").lstrip("../")
+        if candidate.exists():
+            return candidate
+        return None
+
     def _extract_resources_with_duckdb(
         self,
         path: Path,
@@ -134,6 +150,57 @@ class DuckDBDiffEngine(ReconciliationEnginePort):
         except Exception:
             pass
 
+        # Intentar formato de proyección Datax (datax_projection.json / datax-projection-1.0)
+        try:
+            projection_query = f"""
+                WITH raw_fam AS (
+                    SELECT source_id, run_id, unnest(families) AS f FROM read_json_auto('{posix_path}')
+                ),
+                raw_periods AS (
+                    SELECT source_id, run_id, unnest(f.periods) AS p FROM raw_fam
+                ),
+                raw_reps AS (
+                    SELECT source_id, run_id, unnest(p.representations) AS r FROM raw_periods
+                )
+                SELECT
+                    source_id,
+                    run_id,
+                    r
+                FROM raw_reps
+            """
+            rows = con.execute(projection_query).fetchall()
+            if rows:
+                source_id = str(rows[0][0])
+                run_id = str(rows[0][1])
+                items = []
+                for row in rows:
+                    r: dict[str, Any] = row[2]
+                    fmt = str(r.get("format", "") or "")
+                    if fmt and not fmt.startswith("."):
+                        ext = f".{fmt}"
+                    else:
+                        ext = fmt or Path(str(r.get("url", ""))).suffix or ".xlsx"
+
+                    items.append(
+                        DiscoveredResourceItem(
+                            resource_key=str(r.get("resource_key", "")),
+                            url=str(r.get("url", "")),
+                            source_id=source_id,
+                            title=str(r.get("title", "") or r.get("description", "")),
+                            file_extension=ext,
+                            content_type=r.get("content_type"),
+                            content_length_bytes=None,
+                            last_modified_header=r.get("last_modified_header"),
+                            etag=r.get("etag"),
+                            period_label=r.get("period_label"),
+                            content_hash=r.get("content_hash"),
+                            change_status=str(r.get("change_status", "UNCHANGED")),
+                        )
+                    )
+                return source_id, run_id, items
+        except Exception:
+            pass
+
         # Intentar formato compacto (mapa_*_compact.json)
         try:
             compact_query = f"""
@@ -180,27 +247,52 @@ class DuckDBDiffEngine(ReconciliationEnginePort):
     ) -> ReconciliationDiffReport:
         """Compara el inventario externo con el almacenamiento local Bronze."""
         if external_map_path is not None:
-            map_path = Path(external_map_path)
-            if not map_path.exists():
+            resolved_path = self._resolve_map_path(external_map_path)
+            if resolved_path is None:
                 raise ExternalMapNotFoundError(
-                    f"No se encontró el mapa del Prospector Externo en '{map_path}'"
+                    f"No se encontró el mapa del Prospector Externo en '{external_map_path}'"
                 )
             src_id, run_id, discovered = self._extract_resources_with_duckdb(
-                map_path, source_filter=source_id
+                resolved_path, source_filter=source_id
             )
         else:
-            discovered = self._external_client.fetch_resources(
-                source_id=source_id,
-                base_url=external_api_url,
-            )
-            src_id = source_id
-            run_id = (
-                self._external_client.get_latest_run_id(
+            try:
+                discovered = self._external_client.fetch_resources(
                     source_id=source_id,
                     base_url=external_api_url,
                 )
-                or f"run_rest_{source_id}"
-            )
+                src_id = source_id
+                run_id = (
+                    self._external_client.get_latest_run_id(
+                        source_id=source_id,
+                        base_url=external_api_url,
+                    )
+                    or f"run_rest_{source_id}"
+                )
+            except Exception:
+                discovered = []
+                src_id = source_id
+                run_id = f"run_rest_{source_id}"
+
+            # Fallback a búsqueda local de mapas si REST no devolvió recursos
+            if not discovered:
+                candidates = [
+                    Path(f"mapas_externo_last/{source_id}/datax_projection.json"),
+                    Path(f"prospector_externo/output/{source_id}/mapa_{source_id}.json"),
+                    Path(f"prospector_externo/output/{source_id}/mapa_{source_id}_compact.json"),
+                    Path(f"archivos_prospector_interno/{source_id}_mapa_interno_canonico_v1.csv"),
+                ]
+                for cand in candidates:
+                    resolved = self._resolve_map_path(cand)
+                    if resolved and resolved.exists():
+                        try:
+                            src_id, run_id, discovered = self._extract_resources_with_duckdb(
+                                resolved, source_filter=source_id
+                            )
+                            if discovered:
+                                break
+                        except Exception:
+                            continue
 
         diff_items: list[ReconciliationDiffReportItem] = []
         confirmed_count = 0

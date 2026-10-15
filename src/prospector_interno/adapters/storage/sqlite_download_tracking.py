@@ -70,6 +70,10 @@ class SqliteDownloadTrackingAdapter(DownloadTrackingPort):
                 "CREATE INDEX IF NOT EXISTS idx_download_source "
                 "ON download_tracking(source_id);"
             )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_download_checksum "
+                "ON download_tracking(sha256_checksum);"
+            )
 
     def record_download(self, record: DownloadRecord) -> None:
         """Registra o inicializa una tarea de descarga en download_tracking."""
@@ -260,6 +264,35 @@ class SqliteDownloadTrackingAdapter(DownloadTrackingPort):
                 WHERE status IN ('PENDING', 'DOWNLOADING')
                 ORDER BY started_at DESC;
                 """
+            )
+            rows = cur.fetchall()
+            return [self._row_to_record(r) for r in rows]
+
+    def find_by_checksum(self, sha256_checksum: str) -> DownloadRecord | None:
+        """Busca un registro de descarga previa por su hash SHA-256."""
+        with self._lock:
+            cur = self._conn.cursor()
+            cur.execute(
+                "SELECT * FROM download_tracking WHERE sha256_checksum = ?;",
+                (sha256_checksum,),
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+            return self._row_to_record(row)
+
+    def list_downloads_by_source(
+        self,
+        source_id: str,
+    ) -> list[DownloadRecord]:
+        """Lista las descargas registradas para una fuente específica."""
+        with self._lock:
+            cur = self._conn.cursor()
+            cur.execute(
+                "SELECT * FROM download_tracking "
+                "WHERE UPPER(source_id) = UPPER(?) "
+                "ORDER BY completed_at DESC, started_at DESC;",
+                (source_id,),
             )
             rows = cur.fetchall()
             return [self._row_to_record(r) for r in rows]

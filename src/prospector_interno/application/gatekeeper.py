@@ -116,6 +116,15 @@ class PreFlightGatekeeper:
                     lock_acquired=False,
                     missing_periods=missing_periods_list,
                 )
+            if lifecycle.verdict_status == "COMPLETED":
+                return PreFlightEvaluation(
+                    verdict=PreFlightVerdict.CACHE_HIT_BRONZE,
+                    idempotency_key=key,
+                    reason=lifecycle.explanation,
+                    in_flight_task_id=lifecycle.task_id,
+                    lock_acquired=False,
+                    missing_periods=missing_periods_list,
+                )
 
         # 4. Verificación de colisión concurrente en vuelo (HUI-04)
         lock_acquired = self._state_registry.try_acquire_lock(

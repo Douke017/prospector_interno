@@ -89,3 +89,26 @@ class InMemoryCatalogRepository(CatalogRepositoryPort):
 
     def save_dataset(self, dataset: DatasetSpecification) -> None:
         self._datasets_by_code[dataset.dataset_code.upper()] = dataset
+
+    def list_datasets(
+        self,
+        source_id: int | None = None,
+    ) -> list[DatasetSpecification]:
+        if source_id is not None:
+            return [
+                ds for ds in self._datasets_by_code.values()
+                if ds.source_id == source_id
+            ]
+        return list(self._datasets_by_code.values())
+
+    def get_dataset_by_legacy_code(
+        self,
+        legacy_file_code: str,
+    ) -> DatasetSpecification | None:
+        return next(
+            (
+                ds for ds in self._datasets_by_code.values()
+                if ds.legacy_file_code.upper() == legacy_file_code.upper()
+            ),
+            None,
+        )

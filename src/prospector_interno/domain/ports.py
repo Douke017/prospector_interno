@@ -120,6 +120,13 @@ class CatalogRepositoryPort(ABC):
     def save_dataset(self, dataset: DatasetSpecification) -> None:
         """Registra o actualiza la especificación de un dataset."""
 
+    @abstractmethod
+    def list_datasets(
+        self,
+        source_id: int | None = None,
+    ) -> list[DatasetSpecification]:
+        """Lista las especificaciones de datasets, opcionalmente por fuente."""
+
 
 class RateLimiterPort(ABC):
     """Puerto para el control de frecuencia y evitación de bloqueos HTTP."""
@@ -341,6 +348,10 @@ class DownloadTrackingPort(ABC):
     @abstractmethod
     def list_active_downloads(self) -> list[DownloadRecord]:
         """Lista todas las descargas en cola (PENDING) o activas (DOWNLOADING)."""
+
+    @abstractmethod
+    def find_by_checksum(self, sha256_checksum: str) -> DownloadRecord | None:
+        """Busca un registro de descarga previa por su hash SHA-256."""
 
 
 class BrowserTransportPort(ABC):
