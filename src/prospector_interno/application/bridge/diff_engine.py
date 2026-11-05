@@ -256,23 +256,18 @@ class DuckDBDiffEngine(ReconciliationEnginePort):
                 resolved_path, source_filter=source_id
             )
         else:
-            try:
-                discovered = self._external_client.fetch_resources(
+            discovered = self._external_client.fetch_resources(
+                source_id=source_id,
+                base_url=external_api_url,
+            )
+            src_id = source_id
+            run_id = (
+                self._external_client.get_latest_run_id(
                     source_id=source_id,
                     base_url=external_api_url,
                 )
-                src_id = source_id
-                run_id = (
-                    self._external_client.get_latest_run_id(
-                        source_id=source_id,
-                        base_url=external_api_url,
-                    )
-                    or f"run_rest_{source_id}"
-                )
-            except Exception:
-                discovered = []
-                src_id = source_id
-                run_id = f"run_rest_{source_id}"
+                or f"run_rest_{source_id}"
+            )
 
             # Fallback a búsqueda local de mapas si REST no devolvió recursos
             if not discovered:

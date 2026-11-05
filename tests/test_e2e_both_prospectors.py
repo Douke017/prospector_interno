@@ -116,3 +116,40 @@ def test_e2e_bridge_handles_missing_file_error() -> None:
     response = client.post("/api/v1/bridge/reconcile", json=payload)
     assert response.status_code == 404
     assert "No se encontró el mapa" in response.json()["detail"]
+
+
+def test_e2e_reconciliation_bridge_with_bcb() -> None:
+    """Valida el ciclo E2E de conciliación y simulación Sync con el BCB."""
+    map_path = Path("mapas_externo_last/bcb/datax_projection.json")
+    if not map_path.exists():
+        map_path = Path("../mapas_externo_last/bcb/datax_projection.json")
+    if not map_path.exists():
+        map_path = Path("prospector_externo/output/bcb/mapa_bcb.json")
+
+    payload = {
+        "source_id": "bcb",
+        "external_map_path": str(map_path),
+    }
+    # 1. Reconcile
+    response = client.post("/api/v1/bridge/reconcile", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["source_id"] == "bcb"
+    assert data["total_external_resources"] == 527
+    assert "Conciliación finalizada" in data["summary_message"]
+
+    # 2. Sync plan simulation (dry-run)
+    sync_payload = {
+        "source_id": "bcb",
+        "external_map_path": str(map_path),
+        "max_downloads": 5,
+        "execute_downloads": False,
+    }
+    sync_resp = client.post("/api/v1/bridge/sync", json=sync_payload)
+    assert sync_resp.status_code == 200
+    sync_data = sync_resp.json()
+    assert sync_data["source_id"] == "bcb"
+    assert sync_data["total_tasks"] == 5
+    assert sync_data["is_executed"] is False
+    assert "dry-run" in sync_data["summary"]
+

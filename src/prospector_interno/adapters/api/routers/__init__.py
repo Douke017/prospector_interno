@@ -16,6 +16,9 @@ from prospector_interno.adapters.api.routers.downloads_router import (
 from prospector_interno.adapters.api.routers.gatekeeper_router import (
     router as gatekeeper_router,
 )
+from prospector_interno.adapters.api.routers.inventory_router import (
+    router as inventory_router,
+)
 from prospector_interno.adapters.api.routers.reconciliation_router import (
     router as reconciliation_router,
 )
@@ -30,6 +33,7 @@ __all__ = [
     "dictionary_router",
     "downloads_router",
     "gatekeeper_router",
+    "inventory_router",
     "reconciliation_router",
     "search_router",
 ]

@@ -93,6 +93,7 @@ def reconcile_external_map(
             total_new=report.total_new,
             total_modified=report.total_modified,
             summary_message=msg,
+            items=report.items,
         )
     except (ExternalCatalogConnectionError, ExternalCatalogResponseError) as err:
         raise HTTPException(status_code=502, detail=str(err)) from err
@@ -148,6 +149,47 @@ def execute_sync_plan(
             )
 
         executed_plan = _sync_orchestrator.execute_plan(plan_to_run)
+
+        # Actualizar base de datos de control e inventario (url_inventory_map) con la custodia real
+        try:
+            from prospector_interno.adapters.api.routers.inventory_router import _get_conn
+            with _get_conn() as conn:
+                for task in executed_plan.items:
+                    if task.status in ("COMPLETED", "SKIPPED_CACHE_HIT") and task.downloaded_artifact:
+                        artifact = task.downloaded_artifact
+                        cursor = conn.cursor()
+                        cursor.execute(
+                            """
+                            UPDATE url_inventory_map
+                            SET is_downloaded = 1,
+                                sha256_hash = ?,
+                                storage_path = ?,
+                                status = 'COMPLETED',
+                                updated_at = CURRENT_TIMESTAMP
+                            WHERE canonical_url = ?
+                            """,
+                            (artifact.sha256_hash, str(artifact.file_path), task.url)
+                        )
+                        if cursor.rowcount == 0:
+                            cursor.execute(
+                                """
+                                INSERT INTO url_inventory_map (
+                                    source_id, file_name, canonical_url,
+                                    is_discovered_web, is_downloaded, is_processed,
+                                    sha256_hash, storage_path, status
+                                ) VALUES (?, ?, ?, 1, 1, 0, ?, ?, 'COMPLETED')
+                                """,
+                                (
+                                    executed_plan.source_id,
+                                    f"doc_{artifact.sha256_hash[:8]}",
+                                    task.url,
+                                    artifact.sha256_hash,
+                                    str(artifact.file_path),
+                                )
+                            )
+                conn.commit()
+        except Exception:
+            pass
 
         summary = (
             f"Plan {executed_plan.plan_id} completado: "

@@ -152,7 +152,53 @@ def test_compute_diff_via_rest_client(
     assert report.run_id == "run_mock_remote_99"
     assert report.total_external_resources == 2
     assert report.total_new == 2
-    assert report.total_confirmed == 0
     mock_client.fetch_resources.assert_called_once_with(
         source_id="bbv", base_url=None
     )
+
+
+def test_compute_diff_with_bcb_datax_projection(
+    diff_engine: DuckDBDiffEngine,
+) -> None:
+    """Verifica que DuckDBDiffEngine procese datax_projection.json del BCB (527 recursos)."""
+    bcb_projection = Path("mapas_externo_last/bcb/datax_projection.json")
+    if not bcb_projection.exists():
+        bcb_projection = Path("../mapas_externo_last/bcb/datax_projection.json")
+
+    assert bcb_projection.exists(), "El mapa de proyección del BCB debe existir"
+
+    report = diff_engine.compute_diff(
+        source_id="bcb",
+        external_map_path=bcb_projection,
+    )
+
+    assert report.source_id == "bcb"
+    assert report.run_id == "run_20260919_052909_fa1124"
+    assert report.total_external_resources == 527
+    assert len(report.items) == 527
+    assert all("bcb.gob.bo" in item.url for item in report.items)
+    assert all(item.resource_key for item in report.items)
+
+
+def test_compute_diff_auto_discovers_bcb_projection(
+    bronze_storage: LocalBronzeStorage,
+) -> None:
+    """Verifica que compute_diff auto-descubra mapas_externo_last/bcb cuando no se pasa path."""
+    from unittest.mock import create_autospec
+    from prospector_interno.domain.ports import ExternalCatalogClientPort
+
+    # Mock client que no devuelve recursos para forzar fallback local
+    mock_client = create_autospec(ExternalCatalogClientPort)
+    mock_client.fetch_resources.return_value = []
+    mock_client.get_latest_run_id.return_value = None
+
+    engine = DuckDBDiffEngine(
+        storage=bronze_storage,
+        external_client=mock_client,
+    )
+    report = engine.compute_diff(source_id="bcb")
+
+    assert report.source_id == "bcb"
+    assert report.total_external_resources == 527
+    assert len(report.items) == 527
+

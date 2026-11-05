@@ -15,6 +15,7 @@ from prospector_interno.adapters.api.routers import (
     dictionary_router,
     downloads_router,
     gatekeeper_router,
+    inventory_router,
     reconciliation_router,
     search_router,
 )
@@ -88,6 +89,7 @@ app.include_router(downloads_router, prefix="/api/v1")
 app.include_router(reconciliation_router, prefix="/api/v1")
 app.include_router(bridge_router, prefix="/api/v1")
 app.include_router(analytics_router, prefix="/api/v1")
+app.include_router(inventory_router, prefix="/api/v1")
 app.include_router(dictionary_router, prefix="/api/v1")
 app.include_router(search_router, prefix="/api/v1")
 app.include_router(search_router)  # Soporte para /search/export-index directo

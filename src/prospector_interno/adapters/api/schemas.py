@@ -1,6 +1,9 @@
 from pydantic import BaseModel, ConfigDict, Field
 
-from prospector_interno.domain.models import PreFlightVerdict
+from prospector_interno.domain.models import (
+    PreFlightVerdict,
+    ReconciliationDiffReportItem,
+)
 
 
 class SourceResponse(BaseModel):
@@ -217,6 +220,7 @@ class BridgeReconcileResponse(BaseModel):
     total_new: int
     total_modified: int
     summary_message: str
+    items: list[ReconciliationDiffReportItem] = Field(default_factory=list)
 
 
 class BridgeSyncRequest(BaseModel):

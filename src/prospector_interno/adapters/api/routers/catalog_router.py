@@ -1,6 +1,7 @@
 """Router de Catálogo de Fuentes, Activos y Grafo de Linaje (HUI-17)."""
 
 from pathlib import Path
+import sqlite3
 from typing import Any
 from fastapi import APIRouter, HTTPException, Query
 
@@ -32,7 +33,7 @@ from prospector_interno.domain.contracts.lineage_spec import (
     InternalAssetRecord,
     LineageIntegrityCheckResult,
 )
-from prospector_interno.domain.exceptions import EntityNotFoundError
+from prospector_interno.domain.exceptions import EntityNotFoundError, LegacySeederError
 
 router = APIRouter(prefix="/catalog", tags=["1. Catálogo Portal Nexus"])
 
@@ -133,6 +134,151 @@ def set_asset_catalog_service(service: AssetCatalogService) -> None:
     _catalog_service = service
 
 
+def _get_sqlite_snapshot_path() -> Path | None:
+    candidates = [
+        Path("prospector_interno/data/snapshot/platform_prod_snapshot.db"),
+        Path("data/snapshot/platform_prod_snapshot.db"),
+        Path(__file__).resolve().parents[4] / "data/snapshot/platform_prod_snapshot.db",
+        Path(__file__).resolve().parents[5] / "prospector_interno/data/snapshot/platform_prod_snapshot.db",
+    ]
+    for p in candidates:
+        if p.is_file():
+            return p.resolve()
+    return None
+
+
+def _fallback_stats_sqlite() -> CatalogStatsResponse:
+    snap_path = _get_sqlite_snapshot_path()
+    if not snap_path:
+        raise HTTPException(status_code=503, detail="No hay base de datos de producción ni snapshot SQLite disponible")
+    with sqlite3.connect(str(snap_path)) as conn:
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT
+                COUNT(DISTINCT s.short_name) AS total_sources,
+                COUNT(f.id_file) AS total_datasets,
+                (SELECT COUNT(*) FROM download) AS total_downloads
+            FROM source s
+            JOIN file f ON s.id_source = f.id_source;
+            """
+        )
+        row = cur.fetchone()
+        return CatalogStatsResponse(
+            total_active_sources=row["total_sources"] or 0,
+            total_canonical_datasets=row["total_datasets"] or 0,
+            total_historical_downloads=int(row["total_downloads"] or 0),
+            view_status="FALLBACK_SQLITE_SNAPSHOT",
+            query_engine="SQLite Snapshot",
+        )
+
+
+def _fallback_sources_sqlite() -> list[SourceResponse]:
+    snap_path = _get_sqlite_snapshot_path()
+    if not snap_path:
+        raise HTTPException(status_code=503, detail="No hay base de datos de producción ni snapshot SQLite disponible")
+    with sqlite3.connect(str(snap_path)) as conn:
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT
+                s.id_source,
+                'BO_' || UPPER(s.short_name) AS canonical_code,
+                s.name AS official_name,
+                s.short_name,
+                CASE
+                    WHEN TRIM(s.homepage) IN ('vacio', 'no-data', '') THEN NULL
+                    ELSE TRIM(s.homepage)
+                END AS homepage,
+                COUNT(f.id_file) AS total_active_datasets
+            FROM source s
+            INNER JOIN file f ON s.id_source = f.id_source
+            GROUP BY s.id_source, s.short_name, s.name, s.homepage
+            ORDER BY total_active_datasets DESC;
+            """
+        )
+        rows = cur.fetchall()
+        return [
+            SourceResponse(
+                source_id=r["id_source"],
+                canonical_code=r["canonical_code"],
+                official_name=r["official_name"],
+                short_name=r["short_name"],
+                homepage=r["homepage"],
+                country_iso="BOL",
+                is_active=True,
+                total_active_datasets=r["total_active_datasets"],
+            )
+            for r in rows
+        ]
+
+
+def _fallback_datasets_sqlite(
+    q: str | None = None,
+    source_code: str | None = None,
+    limit: int = 20,
+    offset: int = 0,
+) -> list[DatasetResponse]:
+    snap_path = _get_sqlite_snapshot_path()
+    if not snap_path:
+        raise HTTPException(status_code=503, detail="No hay base de datos de producción ni snapshot SQLite disponible")
+    params: list[Any] = []
+    where_parts: list[str] = []
+    if source_code:
+        where_parts.append("UPPER(s.short_name) = UPPER(?)")
+        params.append(source_code)
+    if q:
+        where_parts.append("(f.name LIKE ? OR ('DS_BO_' || UPPER(s.short_name) || '_' || UPPER(f.code)) LIKE ?)")
+        term = f"%{q.strip()}%"
+        params.extend([term, term])
+
+    where_sql = (" WHERE " + " AND ".join(where_parts)) if where_parts else ""
+    query = f"""
+        SELECT
+            'DS_BO_' || UPPER(s.short_name) || '_' || UPPER(f.code) AS canonical_dataset_code,
+            s.short_name AS source_code,
+            s.name AS source_name,
+            f.name AS dataset_name,
+            f.publication_frequency,
+            COALESCE(NULLIF(TRIM(f.specific_url), ''), NULLIF(TRIM(f.main_url), '')) AS target_url,
+            f.type AS format_type,
+            MAX(d.download_date) AS last_download_date,
+            MAX(d.download_hash) AS last_known_hash,
+            COUNT(d.id_download) AS total_historical_downloads
+        FROM source s
+        JOIN file f ON s.id_source = f.id_source
+        LEFT JOIN download d ON f.id_file = d.id_file
+        {where_sql}
+        GROUP BY s.id_source, s.short_name, s.name, f.id_file, f.code, f.name, f.publication_frequency, f.specific_url, f.main_url, f.type
+        ORDER BY total_historical_downloads DESC, canonical_dataset_code
+        LIMIT ? OFFSET ?;
+    """
+    params.extend([limit, offset])
+
+    with sqlite3.connect(str(snap_path)) as conn:
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        cur.execute(query, params)
+        rows = cur.fetchall()
+        return [
+            DatasetResponse(
+                canonical_dataset_code=r["canonical_dataset_code"],
+                source_code=r["source_code"],
+                source_name=r["source_name"],
+                dataset_name=r["dataset_name"],
+                publication_frequency=r["publication_frequency"] or "Mensual",
+                target_url=r["target_url"],
+                format_type=r["format_type"],
+                last_download_date=r["last_download_date"],
+                last_known_hash=r["last_known_hash"],
+                total_historical_downloads=r["total_historical_downloads"] or 0,
+            )
+            for r in rows
+        ]
+
+
 @router.get(
     "/stats",
     response_model=CatalogStatsResponse,
@@ -154,15 +300,11 @@ def get_catalog_stats() -> CatalogStatsResponse:
                             SUM(m.total_historical_downloads), 0
                         ) AS total_downloads
                     FROM {catalog_src};
-
                     """
                 )
                 row = cur.fetchone()
                 if not row:
-                    raise HTTPException(
-                        status_code=500,
-                        detail="Vista no disponible",
-                    )
+                    return _fallback_stats_sqlite()
 
                 return CatalogStatsResponse(
                     total_active_sources=row["total_sources"],
@@ -171,11 +313,8 @@ def get_catalog_stats() -> CatalogStatsResponse:
                     view_status="MATERIALIZED_IN_POSTGRESQL",
                     query_engine="DuckDB + PostgreSQL MV",
                 )
-    except psycopg.Error as err:
-        raise HTTPException(
-            status_code=503,
-            detail=f"Error consultando la base de datos: {err}",
-        ) from err
+    except (psycopg.Error, LegacySeederError):
+        return _fallback_stats_sqlite()
 
 
 @router.get(
@@ -223,11 +362,8 @@ def list_active_sources() -> list[SourceResponse]:
                     )
                     for r in rows
                 ]
-    except psycopg.Error as err:
-        raise HTTPException(
-            status_code=503,
-            detail=f"Error consultando fuentes: {err}",
-        ) from err
+    except (psycopg.Error, LegacySeederError):
+        return _fallback_sources_sqlite()
 
 
 @router.get(
@@ -292,7 +428,6 @@ def search_datasets(
                 rows = cur.fetchall()
 
                 return [
-
                     DatasetResponse(
                         canonical_dataset_code=r["canonical_dataset_code"],
                         source_code=r["source_code"],
@@ -307,11 +442,8 @@ def search_datasets(
                     )
                     for r in rows
                 ]
-    except psycopg.Error as err:
-        raise HTTPException(
-            status_code=503,
-            detail=f"Error en consulta de datasets: {err}",
-        ) from err
+    except (psycopg.Error, LegacySeederError):
+        return _fallback_datasets_sqlite(q=q, source_code=source_code, limit=limit, offset=offset)
 
 
 @router.get(
