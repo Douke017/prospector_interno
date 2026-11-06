@@ -286,6 +286,11 @@ def update_inventory_url_status(
             file_set_clauses.append("is_downloaded = ?")
             file_params.append(1 if request.is_downloaded else 0)
 
+            # Sincronizar el estado de ciclo de vida con la presencia en custodia
+            new_status = "DESCARGADO_BRONZE" if request.is_downloaded else "CATALOGADO_BDD"
+            set_clauses.append("status = ?")
+            params.append(new_status)
+
         sql = f"UPDATE url_inventory_map SET {', '.join(set_clauses)} WHERE id = ?"
         params.append(row_id)
         cur.execute(sql, params)
