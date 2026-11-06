@@ -62,7 +62,8 @@ class UrlInventoryResponse(BaseModel):
 
 
 class UpdateUrlInventoryRequest(BaseModel):
-    is_processed: bool = Field(..., description="Estado de curaduría/procesamiento asignado por el analista")
+    is_processed: Optional[bool] = Field(None, description="Estado de curaduría/procesamiento asignado por el analista")
+    is_downloaded: Optional[bool] = Field(None, description="Estado de adquisición/descarga asignado por el analista")
 
 
 class SourceStatsItem(BaseModel):
@@ -260,18 +261,40 @@ def update_inventory_url_status(
             )
 
         row_id = row["id"]
-        now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-        processed_val = 1 if request.is_processed else 0
+        if request.is_processed is None and request.is_downloaded is None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Debe proporcionar al menos 'is_processed' o 'is_downloaded'",
+            )
 
-        sql = "UPDATE url_inventory_map SET is_processed = ?, updated_at = ? WHERE id = ?"
-        cur.execute(sql, [processed_val, now_iso, row_id])
+        now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        set_clauses: List[str] = ["updated_at = ?"]
+        params: List[Any] = [now_iso]
+
+        file_set_clauses: List[str] = []
+        file_params: List[Any] = []
+
+        if request.is_processed is not None:
+            set_clauses.append("is_processed = ?")
+            params.append(1 if request.is_processed else 0)
+            file_set_clauses.append("is_processed = ?")
+            file_params.append(1 if request.is_processed else 0)
+
+        if request.is_downloaded is not None:
+            set_clauses.append("is_downloaded = ?")
+            params.append(1 if request.is_downloaded else 0)
+            file_set_clauses.append("is_downloaded = ?")
+            file_params.append(1 if request.is_downloaded else 0)
+
+        sql = f"UPDATE url_inventory_map SET {', '.join(set_clauses)} WHERE id = ?"
+        params.append(row_id)
+        cur.execute(sql, params)
 
         # Si tiene correspondencia en la tabla file, propagar
-        if row["file_code"]:
-            cur.execute(
-                "UPDATE file SET is_processed = ? WHERE code = ?",
-                [processed_val, row["file_code"]],
-            )
+        if row["file_code"] and file_set_clauses:
+            file_sql = f"UPDATE file SET {', '.join(file_set_clauses)} WHERE code = ?"
+            file_params.append(row["file_code"])
+            cur.execute(file_sql, file_params)
 
         conn.commit()
 
