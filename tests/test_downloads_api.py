@@ -121,10 +121,10 @@ def test_api_gatekeeper_evaluate_returns_in_progress(
 ) -> None:
     """Criterio 1: POST /api/v1/gatekeeper/evaluate retorna status='IN_PROGRESS'."""
     adapter = get_download_tracking()
-    url = "https://www.asfi.gob.bo/data/cartera_2024-06.xlsx"
+    url = "https://www.asfi.gob.bo/data/cartera_2023-01.xlsx"
     adapter.record_download(
         DownloadRecord(
-            download_id="dl_asfi_2024_06",
+            download_id="dl_asfi_2023_01",
             source_id="asfi",
             canonical_url=url,
             status=DownloadLifecycleStatus.DOWNLOADING,
@@ -136,7 +136,7 @@ def test_api_gatekeeper_evaluate_returns_in_progress(
         "dataset_id": "mart_cartera",
         "domain": "asfi.gob.bo",
         "target_url": url,
-        "temporal_period": "2024-06",
+        "temporal_period": "2023-01",
         "request_id": "analista_http_req_99",
     }
     resp = clean_client.post("/api/v1/gatekeeper/evaluate", json=payload)

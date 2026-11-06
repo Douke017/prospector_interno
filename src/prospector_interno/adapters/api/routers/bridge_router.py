@@ -135,8 +135,8 @@ def execute_sync_plan(
 
         if not request.execute_downloads:
             summary = (
-                f"Plan {plan_to_run.plan_id} generado en simulación (dry-run): "
-                f"{len(limited_items)} tareas priorizadas listas para descarga."
+                f"Simulación completada (dry-run) para {plan_to_run.source_id.upper()}: "
+                f"{len(limited_items)} documentos identificados para resguardo."
             )
             return BridgeSyncResponse(
                 plan_id=plan_to_run.plan_id,
@@ -192,9 +192,9 @@ def execute_sync_plan(
             pass
 
         summary = (
-            f"Plan {executed_plan.plan_id} completado: "
-            f"{executed_plan.completed_tasks} exitosos, "
-            f"{executed_plan.failed_tasks} fallidos de {executed_plan.total_tasks}."
+            f"Resguardo completado para {executed_plan.source_id.upper()}: "
+            f"{executed_plan.completed_tasks} documentos resguardados exitosamente en Capa Bronze, "
+            f"{executed_plan.failed_tasks} incidencias de {executed_plan.total_tasks}."
         )
 
         return BridgeSyncResponse(
