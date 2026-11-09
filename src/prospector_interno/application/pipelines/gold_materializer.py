@@ -563,8 +563,23 @@ class GoldMaterializer:
         total_silver_records = 0
         total_gold_records = 0
 
+        from prospector_interno.application.pipelines.multi_source_consolidator import (
+            consolidate_multi_source_repositories,
+        )
+
+        multi_stats = consolidate_multi_source_repositories(
+            base_gold_path=self._base_path,
+            artifacts=artifacts,
+            target_datamart=target,
+            lineage_tracker=self._lineage_tracker,
+            external_run_id=external_run_id,
+        )
+        for dm_name, dm_info in multi_stats.items():
+            datamart_stats[dm_name] = dm_info
+            total_gold_records += int(dm_info.get("records") or 0)
+
         cartera_records: list[GoldMartCarteraRecord] = []
-        if target in (None, "all", "mart_cartera", "mart_indicadores_asfi"):
+        if target in ("mart_cartera", "mart_indicadores_asfi"):
             finrural_arts = [
                 a for a in artifacts if "finrural" in a.domain.lower()
             ]
@@ -572,7 +587,7 @@ class GoldMaterializer:
             total_silver_records += len(silver_records)
             cartera_records = self.transform_to_mart_cartera(silver_records)
 
-        if target in (None, "all", "mart_cartera"):
+        if target == "mart_cartera":
             m_path = self.materialize_mart_cartera(
                 cartera_records,
                 external_run_id=external_run_id,
@@ -593,7 +608,7 @@ class GoldMaterializer:
             }
             total_gold_records += len(cartera_records)
 
-        if target in (None, "all", "mart_tasas_bcb"):
+        if target == "mart_tasas_bcb":
             bcb_arts = sorted(
                 [
                     a for a in artifacts
@@ -631,7 +646,7 @@ class GoldMaterializer:
             }
             total_gold_records += len(bcb_records)
 
-        if target in (None, "all", "mart_estadisticas_bbv"):
+        if target == "mart_estadisticas_bbv":
             bbv_arts = sorted(
                 [
                     a for a in artifacts
@@ -669,7 +684,7 @@ class GoldMaterializer:
             }
             total_gold_records += len(bbv_records)
 
-        if target in (None, "all", "mart_indicadores_asfi"):
+        if target == "mart_indicadores_asfi":
             asfi_arts = [
                 a for a in artifacts
                 if "asfi" in a.domain.lower() or "asfi" in a.dataset_code.lower()

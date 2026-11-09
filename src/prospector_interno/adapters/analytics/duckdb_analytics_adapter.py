@@ -1,4 +1,4 @@
-"""Adaptador analítico vectorizado sobre los 4 Repositorios Consolidados Gold."""
+"""Adaptador de consulta sobre los 5 Repositorios Consolidados de las 52+ Fuentes DATAX."""
 
 from __future__ import annotations
 
@@ -15,15 +15,219 @@ from prospector_interno.domain.contracts.analytics_spec import (
 from prospector_interno.domain.ports import GoldPartitionPort
 
 
-DATAMART_CATALOG: dict[str, dict[str, Any]] = {
+PRIMARY_DATAMART_CATALOG: dict[str, dict[str, Any]] = {
+    "catalogo_series_files": {
+        "datamart": "catalogo_series_files",
+        "title": "Catálogo Maestro de Series y Archivos Fuente (D_BO_* / A_*)",
+        "source_code": "52+ FUENTES",
+        "description": (
+            "Inventario unificado de las 1.232 series documentales (586 series manuales "
+            "D_BO_* y 646 series automatizadas A_*) de todas las fuentes oficiales, con "
+            "frecuencia, ruta en servidor, descargas en bruto y reportes asociados."
+        ),
+        "default_columns": [
+            "institucion_id",
+            "institucion_nombre",
+            "codigo_serie",
+            "nombre_serie",
+            "tipo_serie",
+            "formato_archivo",
+            "frecuencia_publicacion",
+            "estado_serie",
+            "actualizado_hasta",
+            "total_descargas_bruto",
+            "total_reportes_derivados",
+            "url_principal",
+        ],
+        "allowed_columns": [
+            "institucion_id",
+            "institucion_nombre",
+            "codigo_serie",
+            "nombre_serie",
+            "tipo_serie",
+            "formato_archivo",
+            "frecuencia_publicacion",
+            "estado_serie",
+            "actualizado_hasta",
+            "url_principal",
+            "ruta_servidor_spim",
+            "total_descargas_bruto",
+            "total_reportes_derivados",
+            "gestion",
+            "mes",
+            "source_file_sha256",
+        ],
+    },
+    "historial_descargas_bruto": {
+        "datamart": "historial_descargas_bruto",
+        "title": "Repositorio de Archivos Descargados en Bruto (Download & DAGs)",
+        "source_code": "52+ FUENTES",
+        "description": (
+            "Registro consolidado de los archivos descargados en bruto desde los portales "
+            "web e integraciones automatizadas (Airflow DAGs), preservando ruta física en "
+            "servidor, URL de origen, formato y firma criptográfica."
+        ),
+        "default_columns": [
+            "institucion_id",
+            "institucion_nombre",
+            "id_descarga",
+            "codigo_serie",
+            "nombre_serie",
+            "fecha_datos",
+            "fecha_descarga",
+            "estado_descarga",
+            "formato_archivo",
+            "ruta_archivo_bruto",
+            "url_descarga",
+        ],
+        "allowed_columns": [
+            "institucion_id",
+            "institucion_nombre",
+            "id_descarga",
+            "codigo_serie",
+            "nombre_serie",
+            "fecha_datos",
+            "fecha_descarga",
+            "estado_descarga",
+            "formato_archivo",
+            "ruta_archivo_bruto",
+            "url_descarga",
+            "gestion",
+            "mes",
+            "source_file_sha256",
+        ],
+    },
+    "reportes_conversiones": {
+        "datamart": "reportes_conversiones",
+        "title": "Repositorio de Reportes Extraídos y Conversiones (D_BO_*_xx)",
+        "source_code": "52+ FUENTES",
+        "description": (
+            "Consolidado de los 346 reportes tabulares extraídos desde los archivos en bruto, "
+            "historial de 20.802 conversiones, diagnósticos de cambios de estructura, "
+            "tablas destino de almacenamiento y bases de datos alimentadas."
+        ),
+        "default_columns": [
+            "institucion_id",
+            "institucion_nombre",
+            "codigo_reporte",
+            "codigo_serie_madre",
+            "nombre_reporte",
+            "frecuencia_reporte",
+            "extension_salida",
+            "tabla_almacenamiento",
+            "convertido_hasta",
+            "migrado_hasta",
+            "total_conversiones",
+            "incidencias_estructura",
+            "bases_alimentadas",
+        ],
+        "allowed_columns": [
+            "institucion_id",
+            "institucion_nombre",
+            "codigo_reporte",
+            "codigo_serie_madre",
+            "nombre_reporte",
+            "frecuencia_reporte",
+            "extension_salida",
+            "tabla_almacenamiento",
+            "ruta_conversion",
+            "convertido_hasta",
+            "migrado_hasta",
+            "total_conversiones",
+            "incidencias_estructura",
+            "bases_alimentadas",
+            "gestion",
+            "mes",
+            "source_file_sha256",
+        ],
+    },
+    "bases_datos_cubos": {
+        "datamart": "bases_datos_cubos",
+        "title": "Repositorio de Bases de Datos Consolidadas (DB_BO_* / S_BO*) y Cubos",
+        "source_code": "52+ FUENTES",
+        "description": (
+            "Inventario consolidado de las 694 bases de datos estructuradas, 820 vínculos "
+            "con reportes insumo, 692 cubos SPIM y 63.923 actualizaciones históricas "
+            "disponibles para consulta directa y autoservicio."
+        ),
+        "default_columns": [
+            "institucion_id",
+            "institucion_nombre",
+            "codigo_base",
+            "nombre_base",
+            "frecuencia_datos",
+            "datos_desde",
+            "actualizado_hasta",
+            "proxima_actualizacion",
+            "estado_cubo",
+            "reportes_insumo",
+            "total_actualizaciones",
+            "ultima_url_origen",
+        ],
+        "allowed_columns": [
+            "institucion_id",
+            "institucion_nombre",
+            "codigo_base",
+            "nombre_base",
+            "frecuencia_datos",
+            "frecuencia_actualizacion",
+            "datos_desde",
+            "actualizado_hasta",
+            "proxima_actualizacion",
+            "estado_cubo",
+            "reportes_insumo",
+            "total_actualizaciones",
+            "ultima_url_origen",
+            "gestion",
+            "mes",
+            "source_file_sha256",
+        ],
+    },
+    "mapa_web_52_fuentes": {
+        "datamart": "mapa_web_52_fuentes",
+        "title": "Mapa Unificado de las 52 Fuentes (Prospector Externo ↔ Interno)",
+        "source_code": "52 PORTALES",
+        "description": (
+            "Cruce completo en tiempo real entre todos los mapas y recursos descubiertos "
+            "por el Prospector Externo en los 52 portales y su estado de descarga en bruto "
+            "y consolidación en el servidor interno."
+        ),
+        "default_columns": [
+            "institucion_id",
+            "institucion_nombre",
+            "codigo_recurso",
+            "titulo_documento",
+            "url_canonica",
+            "en_custodia_bruto",
+            "consolidado_en_base",
+            "estado_inventario",
+            "ruta_almacenamiento",
+            "actualizado_en",
+        ],
+        "allowed_columns": [
+            "institucion_id",
+            "institucion_nombre",
+            "codigo_recurso",
+            "titulo_documento",
+            "url_canonica",
+            "en_custodia_bruto",
+            "consolidado_en_base",
+            "estado_inventario",
+            "ruta_almacenamiento",
+            "actualizado_en",
+            "gestion",
+            "mes",
+            "source_file_sha256",
+        ],
+    },
+}
+
+LEGACY_DATAMART_CATALOG: dict[str, dict[str, Any]] = {
     "mart_cartera": {
         "datamart": "mart_cartera",
-        "title": "Repositorio de Cartera y Mora (FINRURAL / IFDs)",
+        "title": "Repositorio de Cartera (Compatibilidad Suite Unitaria)",
         "source_code": "FINRURAL",
-        "description": (
-            "Estados de situación patrimonial, colocaciones de cartera bruta, "
-            "mora, previsiones y ratios de cobertura de entidades financieras de desarrollo."
-        ),
+        "description": "Esquema dimensional para pruebas unitarias aisladas.",
         "default_columns": [
             "gestion",
             "mes",
@@ -55,12 +259,9 @@ DATAMART_CATALOG: dict[str, dict[str, Any]] = {
     },
     "mart_tasas_bcb": {
         "datamart": "mart_tasas_bcb",
-        "title": "Repositorio Monetario, Liquidez e Inflación (BCB)",
+        "title": "Repositorio BCB (Compatibilidad)",
         "source_code": "BCB",
-        "description": (
-            "Series mensuales consolidadas del Banco Central de Bolivia: base y emisión "
-            "monetaria, reservas internacionales, depósitos, bolivianización, IPC y UFV."
-        ),
+        "description": "Esquema de compatibilidad.",
         "default_columns": [
             "gestion",
             "mes",
@@ -91,12 +292,9 @@ DATAMART_CATALOG: dict[str, dict[str, Any]] = {
     },
     "mart_estadisticas_bbv": {
         "datamart": "mart_estadisticas_bbv",
-        "title": "Repositorio Bursátil y Patrimonial (BBV)",
+        "title": "Repositorio BBV (Compatibilidad)",
         "source_code": "BBV",
-        "description": (
-            "Balances generales consolidados de la Bolsa Boliviana de Valores S.A.: "
-            "disponibilidades, inversiones bursátiles, liquidez corriente y solvencia."
-        ),
+        "description": "Esquema de compatibilidad.",
         "default_columns": [
             "gestion",
             "mes",
@@ -129,12 +327,9 @@ DATAMART_CATALOG: dict[str, dict[str, Any]] = {
     },
     "mart_indicadores_asfi": {
         "datamart": "mart_indicadores_asfi",
-        "title": "Repositorio de Indicadores Prudenciales (ASFI)",
+        "title": "Repositorio ASFI (Compatibilidad)",
         "source_code": "ASFI",
-        "description": (
-            "Indicadores prudenciales consolidados bajo normativa de supervisión financiera: "
-            "coeficiente de solvencia, apalancamiento, peso de cartera y cobertura."
-        ),
+        "description": "Esquema de compatibilidad.",
         "default_columns": [
             "gestion",
             "mes",
@@ -167,6 +362,11 @@ DATAMART_CATALOG: dict[str, dict[str, Any]] = {
     },
 }
 
+DATAMART_CATALOG: dict[str, dict[str, Any]] = {
+    **PRIMARY_DATAMART_CATALOG,
+    **LEGACY_DATAMART_CATALOG,
+}
+
 ALLOWED_COLUMNS: set[str] = {
     col
     for cfg in DATAMART_CATALOG.values()
@@ -175,7 +375,7 @@ ALLOWED_COLUMNS: set[str] = {
 
 
 class DuckDBAnalyticsAdapter:
-    """Motor de consulta analítica vectorizada sobre los 4 repositorios Gold."""
+    """Motor de consulta vectorizada sobre los 5 repositorios multi-fuente de DATAX."""
 
     def __init__(
         self,
@@ -210,7 +410,7 @@ class DuckDBAnalyticsAdapter:
 
     def has_data(
         self,
-        datamart: str = "mart_cartera",
+        datamart: str = "catalogo_series_files",
         gestion: int | None = None,
         mes: int | None = None,
     ) -> bool:
@@ -239,48 +439,49 @@ class DuckDBAnalyticsAdapter:
 
     def get_dimensions(
         self,
-        datamart: str = "mart_cartera",
+        datamart: str = "catalogo_series_files",
     ) -> dict[str, list[Any]]:
         glob_path = self._resolve_parquet_glob(datamart)
         if not glob_path:
-            return {"instituciones": [], "gestiones": [], "meses": []}
+            return {"instituciones": [], "institutions": [], "gestiones": [], "meses": []}
 
         con = self._connect()
         try:
             insts = [
                 r[0]
                 for r in con.execute(
-                    f"SELECT DISTINCT institucion_id FROM read_parquet('{glob_path}') ORDER BY 1"
+                    f"SELECT DISTINCT institucion_id FROM read_parquet('{glob_path}') WHERE institucion_id IS NOT NULL ORDER BY 1"
                 ).fetchall()
             ]
             gestiones = [
-                r[0]
+                int(r[0])
                 for r in con.execute(
-                    f"SELECT DISTINCT gestion FROM read_parquet('{glob_path}') ORDER BY 1"
+                    f"SELECT DISTINCT gestion FROM read_parquet('{glob_path}') WHERE gestion IS NOT NULL ORDER BY 1 DESC"
                 ).fetchall()
             ]
             meses = [
-                r[0]
+                int(r[0])
                 for r in con.execute(
-                    f"SELECT DISTINCT mes FROM read_parquet('{glob_path}') ORDER BY 1"
+                    f"SELECT DISTINCT mes FROM read_parquet('{glob_path}') WHERE mes IS NOT NULL ORDER BY 1 ASC"
                 ).fetchall()
             ]
             return {
                 "instituciones": insts,
+                "institutions": insts,
                 "gestiones": gestiones,
                 "meses": meses,
             }
         except Exception:
-            return {"instituciones": [], "gestiones": [], "meses": []}
+            return {"instituciones": [], "institutions": [], "gestiones": [], "meses": []}
         finally:
             con.close()
 
     def get_datamarts_summary(self) -> list[dict[str, Any]]:
-        """Retorna estado físico en vivo de los 4 repositorios consolidados Gold."""
+        """Retorna estado físico en vivo de los 5 repositorios multi-fuente de DATAX."""
         summaries: list[dict[str, Any]] = []
         con = self._connect()
         try:
-            for dm_key, cfg in DATAMART_CATALOG.items():
+            for dm_key, cfg in PRIMARY_DATAMART_CATALOG.items():
                 mart_dir = self._gold_path / dm_key
                 pq_files = list(mart_dir.glob("**/*.parquet")) if mart_dir.exists() else []
                 size_bytes = sum(f.stat().st_size for f in pq_files) if pq_files else 0
@@ -325,8 +526,11 @@ class DuckDBAnalyticsAdapter:
                         "institutions_count": inst_count,
                         "size_bytes": size_bytes,
                         "size_kb": round(size_bytes / 1024, 2),
+                        "min_period": min_period,
+                        "max_period": max_period,
                         "earliest_period": min_period,
                         "latest_period": max_period,
+                        "columns": cfg["default_columns"],
                         "available_columns": cfg["allowed_columns"],
                         "default_columns": cfg["default_columns"],
                     }
@@ -352,7 +556,7 @@ class DuckDBAnalyticsAdapter:
                 records=[],
             )
 
-        dm_cfg = DATAMART_CATALOG.get(dm_key, DATAMART_CATALOG["mart_cartera"])
+        dm_cfg = DATAMART_CATALOG.get(dm_key, PRIMARY_DATAMART_CATALOG["catalogo_series_files"])
         dm_allowed = set(dm_cfg["allowed_columns"])
         default_cols = list(dm_cfg["default_columns"])
 
@@ -372,9 +576,11 @@ class DuckDBAnalyticsAdapter:
         params: list[Any] = []
 
         if request.institutions:
-            placeholders = ", ".join(["?"] * len(request.institutions))
-            where_clauses.append(f"institucion_id IN ({placeholders})")
-            params.extend(request.institutions)
+            upper_insts = [str(i).strip().upper() for i in request.institutions if str(i).strip()]
+            if upper_insts:
+                placeholders = ", ".join(["?"] * len(upper_insts))
+                where_clauses.append(f"UPPER(institucion_id) IN ({placeholders})")
+                params.extend(upper_insts)
 
         if request.gestiones:
             int_gestiones = [int(g) for g in request.gestiones]
@@ -429,7 +635,7 @@ class DuckDBAnalyticsAdapter:
 
 
 class DuckDBGoldPartitionAdapter(GoldPartitionPort):
-    """Adaptador de inspección de particiones Parquet en Capa Gold."""
+    """Adaptador de inspección de particiones Parquet en Repositorios Consolidados."""
 
     def __init__(self, base_gold_path: Path | None = None) -> None:
         self._analytics = DuckDBAnalyticsAdapter(base_gold_path)
@@ -437,7 +643,7 @@ class DuckDBGoldPartitionAdapter(GoldPartitionPort):
 
     def list_available_partitions(
         self,
-        datamart: str = "mart_cartera",
+        datamart: str = "catalogo_series_files",
     ) -> list[tuple[int, int]]:
         mart_dir = self._gold_path / datamart
         if not mart_dir.exists():

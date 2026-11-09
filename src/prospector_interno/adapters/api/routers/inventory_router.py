@@ -136,12 +136,12 @@ def get_inventory_stats() -> InventoryStatsResponse:
                 cur.execute(
                     """
                     SELECT
-                        source_id,
+                        UPPER(source_id) AS source_id,
                         COUNT(*) AS total,
                         COALESCE(SUM(CASE WHEN is_downloaded THEN 1 ELSE 0 END), 0) AS downloaded,
                         COALESCE(SUM(CASE WHEN is_processed THEN 1 ELSE 0 END), 0) AS processed
                     FROM public.url_inventory_map
-                    GROUP BY source_id
+                    GROUP BY UPPER(source_id)
                     ORDER BY total DESC;
                     """
                 )
@@ -166,12 +166,12 @@ def get_inventory_stats() -> InventoryStatsResponse:
             cur.execute(
                 """
                 SELECT
-                    source_id,
+                    UPPER(source_id) AS source_id,
                     COUNT(*) as total,
                     SUM(CASE WHEN is_downloaded = 1 THEN 1 ELSE 0 END) as downloaded,
                     SUM(CASE WHEN is_processed = 1 THEN 1 ELSE 0 END) as processed
                 FROM url_inventory_map
-                GROUP BY source_id
+                GROUP BY UPPER(source_id)
                 ORDER BY total DESC
                 """
             )
@@ -407,10 +407,14 @@ def update_inventory_url_status(
 
                 if row.get("file_code") and file_clauses:
                     file_params.append(row["file_code"])
-                    cur.execute(
-                        f"UPDATE public.file SET {', '.join(file_clauses)} WHERE code = %s;",
-                        tuple(file_params),
-                    )
+                    cur.execute("SAVEPOINT sp_inv_update_file;")
+                    try:
+                        cur.execute(
+                            f"UPDATE public.file SET {', '.join(file_clauses)} WHERE code = %s;",
+                            tuple(file_params),
+                        )
+                    except Exception:
+                        cur.execute("ROLLBACK TO SAVEPOINT sp_inv_update_file;")
 
                 cur.execute(
                     "SELECT * FROM public.url_inventory_map WHERE id = %s;",

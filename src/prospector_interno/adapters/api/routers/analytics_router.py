@@ -244,10 +244,10 @@ def _build_csv_bytes(query_res: AnalyticsQueryResponse) -> bytes:
 
 @router.get(
     "/datamarts",
-    summary="Listar estado y métricas en vivo de los 4 repositorios consolidados Gold",
+    summary="Listar estado y métricas en vivo de los 5 repositorios consolidados Gold",
 )
 def list_consolidated_datamarts() -> list[dict[str, Any]]:
-    """Retorna el inventario operativo de los 4 repositorios analíticos."""
+    """Retorna el inventario operativo de los 5 repositorios consolidados multi-fuente."""
     bulkhead = get_bulkhead_manager()
     return bulkhead.execute_analytics(_analytics_adapter.get_datamarts_summary)
 
@@ -268,9 +268,9 @@ def query_gold_mart(request: AnalyticsQueryRequest) -> AnalyticsQueryResponse:
     summary="Listar dimensiones disponibles en un repositorio consolidado",
 )
 def get_gold_dimensions(
-    datamart: str = "mart_cartera",
+    datamart: str = "catalogo_series_files",
 ) -> dict[str, list[Any]]:
-    """Consulta las instituciones, gestiones y meses consolidados."""
+    """Consulta las fuentes, gestiones y meses consolidados."""
     bulkhead = get_bulkhead_manager()
     return bulkhead.execute_analytics(_analytics_adapter.get_dimensions, datamart)
 
@@ -350,12 +350,12 @@ def materialize_gold_from_bronze(
 )
 def export_datamart_xlsx(
     request: Request,
-    datamart: str = Query(default="mart_cartera"),
+    datamart: str = Query(default="catalogo_series_files"),
     gestion: int | None = Query(default=None),
     mes: int | None = Query(default=None),
     institution_id: str | None = Query(default=None),
 ) -> StreamingResponse:
-    """Genera un archivo Excel estructurado de 3 hojas listo para análisis financiero."""
+    """Genera un archivo Excel estructurado de 3 hojas listo para ciencia de datos."""
     dm_clean = datamart.strip().lower()
     query_res = _execute_export_dataset(
         datamart=dm_clean,
@@ -405,7 +405,7 @@ def export_datamart_xlsx(
 )
 def export_datamart_csv(
     request: Request,
-    datamart: str = Query(default="mart_cartera"),
+    datamart: str = Query(default="catalogo_series_files"),
     gestion: int | None = Query(default=None),
     mes: int | None = Query(default=None),
     institution_id: str | None = Query(default=None),

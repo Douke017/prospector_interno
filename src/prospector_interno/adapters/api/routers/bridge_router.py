@@ -44,7 +44,10 @@ _downloader = ResumableStreamDownloader(
     circuit_breaker=_circuit_breaker,
 )
 
-_diff_engine = DuckDBDiffEngine(storage=_storage)
+_diff_engine = DuckDBDiffEngine(
+    storage=_storage,
+    url_inventory_repo=deps.url_inventory_repo,
+)
 _sync_orchestrator = SyncOrchestrator(
     gatekeeper=_gatekeeper,
     storage=_storage,
@@ -140,10 +143,20 @@ def execute_sync_plan(
             external_api_url=request.external_api_url,
         )
 
+        if executed_plan.completed_tasks > 0 and not deps.is_isolated_test_mode():
+            try:
+                deps.gold_materializer.consolidate_all_datamarts(
+                    _storage.get_artifacts(),
+                    target_datamart="mapa_web_52_fuentes",
+                    url_inventory_repo=deps.url_inventory_repo,
+                )
+            except Exception:
+                pass
+
         summary = (
             f"Resguardo completado para {executed_plan.source_id.upper()}: "
-            f"{executed_plan.completed_tasks} documentos resguardados exitosamente en Capa Bronze, "
-            f"{executed_plan.failed_tasks} incidencias de {executed_plan.total_tasks}."
+            f"{executed_plan.completed_tasks} documentos resguardados exitosamente en Custodia Documental "
+            f"y sincronizados con Prospector Externo ({executed_plan.failed_tasks} incidencias de {executed_plan.total_tasks})."
         )
 
         return BridgeSyncResponse(

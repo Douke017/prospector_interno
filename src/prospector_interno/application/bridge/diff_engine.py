@@ -37,9 +37,11 @@ class DuckDBDiffEngine(ReconciliationEnginePort):
         self,
         storage: BronzeStoragePort,
         external_client: ExternalCatalogClientPort | None = None,
+        url_inventory_repo: Any = None,
     ) -> None:
         self._storage = storage
         self._external_client = external_client or HttpExternalCatalogClient()
+        self._url_inventory_repo = url_inventory_repo
 
     def _resolve_map_path(self, path: Path | str) -> Path | None:
         """Resuelve rutas relativas o absolutas de mapas externos de forma resiliente."""
@@ -294,9 +296,19 @@ class DuckDBDiffEngine(ReconciliationEnginePort):
         new_count = 0
         modified_count = 0
 
+        downloaded_urls_in_db: set[str] = set()
+        if external_map_path is None and self._url_inventory_repo is not None:
+            try:
+                downloaded_urls_in_db = self._url_inventory_repo.get_downloaded_url_set(
+                    source_id=source_id
+                )
+            except Exception:
+                downloaded_urls_in_db = set()
+
         for item in discovered:
-            domain = urlparse(item.url).netloc or source_id
-            dataset_code = f"DS_BO_{source_id.upper()}"
+            item_src = item.source_id if (src_id.upper() == "ALL" and item.source_id) else src_id
+            domain = urlparse(item.url).netloc or item_src
+            dataset_code = f"DS_BO_{item_src.upper()}"
 
             # 1. Verificar si ya existe en Capa Bronze por URL exacta de descarga
             cached = self._storage.find_by_url(item.url)
@@ -316,21 +328,33 @@ class DuckDBDiffEngine(ReconciliationEnginePort):
                     dataset_code=dataset_code,
                     period=item.period_label,
                 )
-                if cached is None and domain != source_id:
+                if cached is None and domain != item_src:
                     cached = self._storage.find_by_period(
-                        domain=source_id,
+                        domain=item_src,
                         dataset_code=dataset_code,
                         period=item.period_label,
                     )
 
-            if cached is not None:
-                category = ResourceChangeCategory.CONFIRMED
-                confirmed_count += 1
-                detail = "Recurso verificado y disponible en almacenamiento local."
-            elif item.change_status == "MODIFIED":
+            in_db_custody = (
+                external_map_path is None
+                and item.url.strip() in downloaded_urls_in_db
+            )
+
+            if item.change_status == "MODIFIED" and (
+                cached is None
+                or (item.content_hash and cached.sha256_hash != item.content_hash)
+            ):
                 category = ResourceChangeCategory.MODIFIED
                 modified_count += 1
                 detail = "Recurso detectado con cambio de contenido en origen."
+            elif cached is not None or in_db_custody:
+                category = ResourceChangeCategory.CONFIRMED
+                confirmed_count += 1
+                detail = (
+                    "Recurso verificado y disponible en custodia local."
+                    if cached is not None
+                    else "Recurso registrado y descargado en inventario relacional."
+                )
             else:
                 category = ResourceChangeCategory.NEW
                 new_count += 1
@@ -340,7 +364,7 @@ class DuckDBDiffEngine(ReconciliationEnginePort):
                 ReconciliationDiffReportItem(
                     resource_key=item.resource_key,
                     url=item.url,
-                    source_id=src_id,
+                    source_id=item_src,
                     category=category,
                     file_extension=item.file_extension,
                     period_label=item.period_label,

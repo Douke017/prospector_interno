@@ -72,12 +72,18 @@ class HttpExternalCatalogClient(ExternalCatalogClientPort):
         source_id: str,
         base_url: str | None = None,
     ) -> list[DiscoveredResourceItem]:
-        """Obtiene candidatos descubiertos para una fuente desde la Catalog API."""
+        """Obtiene candidatos descubiertos para una fuente o todo el catálogo desde la Catalog API."""
         resolved_base = self._resolve_url(base_url)
         target_url = f"{resolved_base}/catalog/resources"
+        clean_src = (source_id or "").strip()
+        params: dict[str, Any] = (
+            {}
+            if not clean_src or clean_src.upper() == "ALL"
+            else {"source_id": clean_src}
+        )
 
         try:
-            resp = self._client.get(target_url, params={"source_id": source_id})
+            resp = self._client.get(target_url, params=params)
         except httpx.RequestError as err:
             raise ExternalCatalogConnectionError(
                 f"No fue posible conectar con la Catalog API Facade en "

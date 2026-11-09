@@ -83,23 +83,34 @@ class PreFlightGatekeeper:
                 pass
 
         # 1.5. Verificación en Repositorio Consolidado Gold (Objetivo 1 y 5)
+        ds_lower = request.dataset_code.strip().lower()
         if (
             not request.force_refresh
             and self._gold_checker is not None
-            and request.dataset_code.lower().startswith("mart_")
             and request.period
+            and (
+                ds_lower.startswith("mart_")
+                or ds_lower
+                in (
+                    "catalogo_series_files",
+                    "historial_descargas_bruto",
+                    "reportes_conversiones",
+                    "bases_datos_cubos",
+                    "mapa_web_52_fuentes",
+                )
+            )
             and re.fullmatch(r"\d{4}-\d{2}", request.period.strip())
         ):
             g_yr, g_mo = request.period.strip().split("-")
             if self._gold_checker.has_partition(
-                request.dataset_code.lower(), int(g_yr), int(g_mo)
+                ds_lower, int(g_yr), int(g_mo)
             ):
                 return PreFlightEvaluation(
                     verdict=PreFlightVerdict.CACHE_HIT_GOLD,
                     idempotency_key=key,
                     reason=(
-                        f"Periodo {request.period} ya consolidado y disponible en "
-                        f"{request.dataset_code.lower()}."
+                        f"Corte {request.period} ya consolidado "
+                        f"y disponible en el repositorio '{ds_lower}'."
                     ),
                     lock_acquired=False,
                 )

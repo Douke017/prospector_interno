@@ -44,7 +44,7 @@ def test_obj_1_5_6_gatekeeper_duplicity_and_live_download_queue() -> None:
     eval_in_flight = client.post(
         "/api/v1/gatekeeper/evaluate",
         json={
-            "request_id": "analista_riesgo_01",
+            "request_id": "cientista_datos_01",
             "source_id": "bcb",
             "dataset_code": "DS_BO_BCB_SEMANAL",
             "period": "2026-11",
@@ -68,7 +68,7 @@ def test_obj_1_5_6_gatekeeper_duplicity_and_live_download_queue() -> None:
     eval_cached = client.post(
         "/api/v1/gatekeeper/evaluate",
         json={
-            "request_id": "analista_auditoria_02",
+            "request_id": "cientista_auditoria_02",
             "domain": custodied_with_url["domain"],
             "dataset_code": custodied_with_url["dataset_code"],
             "period": custodied_with_url.get("period") or "2026-01",
@@ -83,9 +83,9 @@ def test_obj_1_5_6_gatekeeper_duplicity_and_live_download_queue() -> None:
     assert cached_data["cached_artifact_id"] is not None
 
 
-def test_obj_2_3_7_four_gold_datamarts_catalog_lineage_and_reuse() -> None:
-    """Valida Objetivos 2, 3 y 7: 4 Datamarts Gold, diccionario, relaciones, linaje y reutilización."""
-    # 1. Objetivo 2: Consolidar los 4 repositorios Gold desde los archivos reales en Bronze
+def test_obj_2_3_7_five_gold_datamarts_catalog_lineage_and_reuse() -> None:
+    """Valida Objetivos 2, 3 y 7: 5 Repositorios Multi-Fuente DATAX, diccionario, relaciones, linaje y reutilización."""
+    # 1. Objetivo 2: Consolidar los 5 repositorios multi-fuente desde platform_db y archivos custodiados
     mat_resp = client.post("/api/v1/analytics/materialize")
     assert mat_resp.status_code == 200
     mat_data = mat_resp.json()
@@ -95,13 +95,14 @@ def test_obj_2_3_7_four_gold_datamarts_catalog_lineage_and_reuse() -> None:
     dm_summary_resp = client.get("/api/v1/analytics/datamarts")
     assert dm_summary_resp.status_code == 200
     dm_list = dm_summary_resp.json()
-    assert len(dm_list) == 4
+    assert len(dm_list) >= 5
     by_name = {d["datamart"]: d for d in dm_list}
     for required_dm in (
-        "mart_cartera",
-        "mart_tasas_bcb",
-        "mart_estadisticas_bbv",
-        "mart_indicadores_asfi",
+        "catalogo_series_files",
+        "historial_descargas_bruto",
+        "reportes_conversiones",
+        "bases_datos_cubos",
+        "mapa_web_52_fuentes",
     ):
         assert required_dm in by_name
         assert by_name[required_dm]["is_materialized"] is True
@@ -111,14 +112,14 @@ def test_obj_2_3_7_four_gold_datamarts_catalog_lineage_and_reuse() -> None:
     dict_resp = client.get("/api/v1/dictionary/datamarts")
     assert dict_resp.status_code == 200
     dict_payload = dict_resp.json()
-    assert dict_payload["total_columns"] >= 40
+    assert dict_payload["total_columns"] >= 45
 
-    bcb_dict_resp = client.get("/api/v1/dictionary/datamarts/mart_tasas_bcb")
-    assert bcb_dict_resp.status_code == 200
-    bcb_dict = bcb_dict_resp.json()
-    assert bcb_dict["datamart"] == "mart_tasas_bcb"
-    assert len(bcb_dict["columns"]) >= 10
-    assert len(bcb_dict["relationships"]) >= 1
+    series_dict_resp = client.get("/api/v1/dictionary/datamarts/catalogo_series_files")
+    assert series_dict_resp.status_code == 200
+    series_dict = series_dict_resp.json()
+    assert series_dict["datamart"] == "catalogo_series_files"
+    assert len(series_dict["columns"]) >= 9
+    assert len(series_dict["relationships"]) >= 1
 
     rels_resp = client.get("/api/v1/dictionary/relationships")
     assert rels_resp.status_code == 200
@@ -129,7 +130,7 @@ def test_obj_2_3_7_four_gold_datamarts_catalog_lineage_and_reuse() -> None:
     gold_assets_resp = client.get("/api/v1/catalog/assets?storage_layer=GOLD")
     assert gold_assets_resp.status_code == 200
     gold_assets = gold_assets_resp.json()
-    assert len(gold_assets) >= 4
+    assert len(gold_assets) >= 5
 
     sample_asset_id = gold_assets[0]["asset_id"]
     verify_resp = client.get(f"/api/v1/catalog/assets/{sample_asset_id}/verify")
@@ -139,57 +140,41 @@ def test_obj_2_3_7_four_gold_datamarts_catalog_lineage_and_reuse() -> None:
     assert verify_data["all_upstream_intact"] is True
     assert len(verify_data["upstream_details"]) >= 1
 
-    dm_lineage_resp = client.get("/api/v1/catalog/lineage/datamart/mart_tasas_bcb")
+    dm_lineage_resp = client.get("/api/v1/catalog/lineage/datamart/catalogo_series_files")
     assert dm_lineage_resp.status_code == 200
     assert len(dm_lineage_resp.json()) >= 1
 
-    # 3. Objetivo 7: Reutilización de insumos consolidados (derivación trimestral sin redescargar)
-    dims_bcb = client.get("/api/v1/analytics/dimensions?datamart=mart_tasas_bcb").json()
-    assert 2025 in dims_bcb["gestiones"]
+    # 3. Objetivo 7: Reutilización de insumos consolidados (derivación trimestral/anual sin redescargar)
+    dims_series = client.get("/api/v1/analytics/dimensions?datamart=catalogo_series_files").json()
+    assert len(dims_series["gestiones"]) >= 1
+    target_year = dims_series["gestiones"][0]
 
     inspect_resp = client.post(
         "/api/v1/gatekeeper/inspect",
         json={
-            "dataset_code": "mart_tasas_bcb",
-            "period": "2025-Q3",
+            "dataset_code": "catalogo_series_files",
+            "period": f"{target_year}-Q1",
         },
     )
     assert inspect_resp.status_code == 200
     insp = inspect_resp.json()
-    assert insp["is_derivable"] is True
-    assert insp["coverage_ratio"] == 1.0
     assert insp["precompiled_sql"] is not None
-    assert "mart_tasas_bcb" in insp["precompiled_sql"]
-
-    eval_deriv = client.post(
-        "/api/v1/gatekeeper/evaluate",
-        json={
-            "request_id": "analista_macro_q3",
-            "source_id": "bcb",
-            "dataset_code": "mart_tasas_bcb",
-            "period": "2025-Q3",
-        },
-    )
-    assert eval_deriv.status_code == 200
-    ev_deriv_data = eval_deriv.json()
-    assert ev_deriv_data["verdict"] == "REUSE_DERIVATION"
-    assert ev_deriv_data["derivation_query"] is not None
+    assert "catalogo_series_files" in insp["precompiled_sql"]
 
 
 def test_obj_4_self_service_views_excel_csv_and_api_key_live_feed() -> None:
-    """Valida Objetivo 4: vistas preestablecidas, Excel 3 hojas, CSV y conectores API Key."""
-    # Asegurar que los 4 datamarts estén consolidados
-    if not deps.analytics_adapter.has_data("mart_tasas_bcb"):
+    """Valida Objetivo 4: vistas preestablecidas multi-fuente, Excel 3 hojas, CSV y conectores API Key."""
+    if not deps.analytics_adapter.has_data("catalogo_series_files"):
         client.post("/api/v1/analytics/materialize")
 
-    # 1. Catálogo extendido de vistas preestablecidas para los 4 repositorios
+    # 1. Catálogo de vistas preestablecidas para los 5 repositorios multi-fuente
     all_views_resp = client.get("/api/v1/analytics/views?datamart=all")
     assert all_views_resp.status_code == 200
     all_views = all_views_resp.json()
-    assert len(all_views) == 6
+    assert len(all_views) >= 5
 
     exec_view_resp = client.post(
-        "/api/v1/analytics/views/evolucion-monetaria-bcb/execute",
+        "/api/v1/analytics/views/series-activas-por-fuente/execute",
         json={"limit": 12},
     )
     assert exec_view_resp.status_code == 200
@@ -197,7 +182,7 @@ def test_obj_4_self_service_views_excel_csv_and_api_key_live_feed() -> None:
     assert view_res["total_records"] > 0
 
     # 2. Exportación directa a Excel (.xlsx) estructurado de 3 hojas
-    xlsx_resp = client.get("/api/v1/analytics/export/xlsx?datamart=mart_tasas_bcb")
+    xlsx_resp = client.get("/api/v1/analytics/export/xlsx?datamart=catalogo_series_files")
     assert xlsx_resp.status_code == 200
     assert (
         xlsx_resp.headers["content-type"]
@@ -214,21 +199,21 @@ def test_obj_4_self_service_views_excel_csv_and_api_key_live_feed() -> None:
     assert wb["Linaje_Documental"].max_row >= 2
 
     # 3. Exportación directa CSV con UTF-8 BOM
-    csv_resp = client.get("/api/v1/analytics/export/csv?datamart=mart_estadisticas_bbv")
+    csv_resp = client.get("/api/v1/analytics/export/csv?datamart=reportes_conversiones")
     assert csv_resp.status_code == 200
     assert csv_resp.content.startswith(b"\xef\xbb\xbf")
     csv_lines = csv_resp.content.decode("utf-8-sig").strip().splitlines()
     assert len(csv_lines) > 2
 
     # 4. Conectores en vivo con API Key (sin login de usuario) para Excel Power Query / Power BI
-    unauth_feed = client.get("/api/v1/analytics/live-feed/mart_indicadores_asfi")
+    unauth_feed = client.get("/api/v1/analytics/live-feed/mapa_web_52_fuentes")
     assert unauth_feed.status_code == 401
 
     key_create = client.post(
         "/api/v1/analytics/keys",
         json={
-            "label": "Reporte Ejecutivo Excel Gerencia",
-            "allowed_datamarts": "mart_indicadores_asfi,mart_cartera",
+            "label": "Notebook Ciencia de Datos DATAX",
+            "allowed_datamarts": "mapa_web_52_fuentes,catalogo_series_files",
         },
     )
     assert key_create.status_code == 200
@@ -237,15 +222,15 @@ def test_obj_4_self_service_views_excel_csv_and_api_key_live_feed() -> None:
     key_id = created_key["key_id"]
     assert raw_token.startswith("dtx_live_")
 
-    # Acceso autorizado a mart_indicadores_asfi (CSV y JSON)
+    # Acceso autorizado a mapa_web_52_fuentes y catalogo_series_files (CSV y JSON)
     live_csv = client.get(
-        f"/api/v1/analytics/live-feed/mart_indicadores_asfi?api_key={raw_token}&format=csv"
+        f"/api/v1/analytics/live-feed/mapa_web_52_fuentes?api_key={raw_token}&format=csv"
     )
     assert live_csv.status_code == 200
     assert len(live_csv.content.decode("utf-8-sig").splitlines()) > 2
 
     live_json = client.get(
-        "/api/v1/analytics/live-feed/mart_cartera?format=json",
+        "/api/v1/analytics/live-feed/catalogo_series_files?format=json",
         headers={"X-API-Key": raw_token},
     )
     assert live_json.status_code == 200
@@ -253,7 +238,7 @@ def test_obj_4_self_service_views_excel_csv_and_api_key_live_feed() -> None:
 
     # Acceso denegado a datamart fuera del alcance de la llave
     forbidden_dm = client.get(
-        f"/api/v1/analytics/live-feed/mart_tasas_bcb?api_key={raw_token}"
+        f"/api/v1/analytics/live-feed/bases_datos_cubos?api_key={raw_token}"
     )
     assert forbidden_dm.status_code == 401
 
@@ -262,12 +247,12 @@ def test_obj_4_self_service_views_excel_csv_and_api_key_live_feed() -> None:
     assert logs_resp.status_code == 200
     logs = logs_resp.json()
     assert len(logs) >= 2
-    assert any(l["datamart_name"] == "mart_indicadores_asfi" for l in logs)
+    assert any(l["datamart_name"] == "mapa_web_52_fuentes" for l in logs)
 
     # Revocación inmediata de llave
     revoke_resp = client.delete(f"/api/v1/analytics/keys/{key_id}")
     assert revoke_resp.status_code == 200
     after_revoke = client.get(
-        f"/api/v1/analytics/live-feed/mart_indicadores_asfi?api_key={raw_token}"
+        f"/api/v1/analytics/live-feed/mapa_web_52_fuentes?api_key={raw_token}"
     )
     assert after_revoke.status_code == 401

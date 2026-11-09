@@ -100,6 +100,29 @@ def compile_derivation_sql(
     )
     dm = datamart.strip().lower()
 
+    if dm in (
+        "catalogo_series_files",
+        "historial_descargas_bruto",
+        "reportes_conversiones",
+        "bases_datos_cubos",
+        "mapa_web_52_fuentes",
+    ):
+        return (
+            "SELECT "
+            "institucion_id, "
+            "institucion_nombre, "
+            f"{breakdown.gestion} AS gestion, "
+            f"'{breakdown.raw_period}' AS periodo_derivado, "
+            "COUNT(*) AS registros_consolidados, "
+            "COUNT(DISTINCT source_file_sha256) AS archivos_fuente_unicos, "
+            "COUNT(DISTINCT mes) AS meses_agregados "
+            f"FROM read_parquet('{parquet_glob}') "
+            f"WHERE gestion = {breakdown.gestion} AND mes IN ({months_str})"
+            f"{inst_clause} "
+            "GROUP BY institucion_id, institucion_nombre "
+            "ORDER BY registros_consolidados DESC;"
+        )
+
     if dm == "mart_tasas_bcb":
         return (
             "SELECT "

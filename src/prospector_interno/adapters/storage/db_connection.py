@@ -127,13 +127,26 @@ def get_database_config(
 
 
 def get_replica_config(read_only: bool = False) -> DatabaseConfig:
-    """Retorna la configuración hacia la réplica PostgreSQL local de DATAX."""
-    host = os.environ.get("PROSPECTOR_PG_HOST", "127.0.0.1")
-    port = int(os.environ.get("PROSPECTOR_PG_PORT", "5434"))
-    database = os.environ.get("PROSPECTOR_PG_DB", "platform_db")
-    user = os.environ.get("PROSPECTOR_PG_USER", "postgres")
-    password = os.environ.get("PROSPECTOR_PG_PASSWORD", "postgres")
-    timeout = int(os.environ.get("PROSPECTOR_PG_TIMEOUT", "2"))
+    """Retorna la configuración hacia PostgreSQL de DATAX (producción o réplica)."""
+    is_pytest = "PYTEST_CURRENT_TEST" in os.environ and "FORCE_PROD_DB" not in os.environ
+    if is_pytest:
+        return DatabaseConfig(
+            host=os.environ.get("PROSPECTOR_PG_HOST", "127.0.0.1"),
+            port=int(os.environ.get("PROSPECTOR_PG_PORT", "5434")),
+            database=os.environ.get("PROSPECTOR_PG_DB", "platform_db"),
+            user=os.environ.get("PROSPECTOR_PG_USER", "postgres"),
+            password=os.environ.get("PROSPECTOR_PG_PASSWORD", "postgres"),
+            connect_timeout=int(os.environ.get("PROSPECTOR_PG_TIMEOUT", "2")),
+            read_only=read_only,
+        )
+
+    env_cfg = get_database_config(force_prod=True)
+    host = os.environ.get("PROSPECTOR_PG_HOST", env_cfg.host)
+    port = int(os.environ.get("PROSPECTOR_PG_PORT", str(env_cfg.port)))
+    database = os.environ.get("PROSPECTOR_PG_DB", env_cfg.database)
+    user = os.environ.get("PROSPECTOR_PG_USER", env_cfg.user)
+    password = os.environ.get("PROSPECTOR_PG_PASSWORD", env_cfg.password)
+    timeout = int(os.environ.get("PROSPECTOR_PG_TIMEOUT", "5"))
     return DatabaseConfig(
         host=host,
         port=port,

@@ -247,7 +247,10 @@ class SyncOrchestrator(SyncOrchestratorPort):
                 except Exception:
                     pass
 
-            if external_api_url:
+            should_notify_ext = bool(external_api_url) or not bool(
+                os.getenv("PYTEST_CURRENT_TEST")
+            )
+            if should_notify_ext:
                 self._notify_external_resource_status(
                     item.resource_key,
                     "EN_PROCESO",
@@ -297,6 +300,13 @@ class SyncOrchestrator(SyncOrchestratorPort):
                     except Exception:
                         pass
 
+                if should_notify_ext:
+                    self._notify_external_resource_status(
+                        item.resource_key,
+                        "PROCESADO_EXITOSAMENTE",
+                        external_api_url=external_api_url,
+                    )
+
                 executed_items.append(
                     item.model_copy(
                         update={
@@ -318,7 +328,7 @@ class SyncOrchestrator(SyncOrchestratorPort):
                     except Exception:
                         pass
 
-                if external_api_url:
+                if should_notify_ext:
                     self._notify_external_resource_status(
                         item.resource_key,
                         "ERROR",

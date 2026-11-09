@@ -1,4 +1,4 @@
-"""Servicio de ejecución y catálogo de Vistas Analíticas Predefinidas."""
+"""Servicio de ejecución y catálogo de Vistas Preestablecidas de Autoservicio."""
 
 from __future__ import annotations
 
@@ -82,87 +82,140 @@ VIEWS_CATALOG: list[PredefinedViewMetadata] = [
     ),
 ]
 
-EXTENDED_VIEWS_CATALOG: list[PredefinedViewMetadata] = [
-    *VIEWS_CATALOG,
+MULTI_SOURCE_VIEWS_CATALOG: list[PredefinedViewMetadata] = [
     PredefinedViewMetadata(
-        view_id="evolucion-monetaria-bcb",
-        title="Evolución Monetaria, Reservas Internacionales e Inflación (BCB)",
+        view_id="series-activas-por-fuente",
+        title="Series Documentales Vigentes y Volumen de Descargas (D_BO_* / A_*)",
         description=(
-            "Serie cronológica del Banco Central de Bolivia con base monetaria, "
-            "reservas internacionales netas, inflación mensual, bolivianización y UFV."
+            "Inventario priorizado de las series de archivos fuente manuales y "
+            "automatizadas de las 52+ fuentes ordenadas por volumen de descargas."
         ),
-        category="MONETARIO",
-        supported_filters=["gestion", "mes", "limit"],
-        output_columns=[
-            "gestion",
-            "mes",
-            "institucion_id",
-            "base_monetaria_bs",
-            "emision_monetaria_bs",
-            "reservas_internacionales_usd",
-            "inflacion_mensual_pct",
-            "bolivianizacion_depositos_pct",
-            "ufv_cierre",
-        ],
-    ),
-    PredefinedViewMetadata(
-        view_id="estados-financieros-bbv",
-        title="Liquidez, Inversiones Bursátiles y Solvencia Patrimonial (BBV)",
-        description=(
-            "Evolución mensual de activos corrientes, inversiones bursátiles, "
-            "patrimonio y razones de liquidez y endeudamiento de la BBV S.A."
-        ),
-        category="BURSATIL",
-        supported_filters=["gestion", "mes", "limit"],
-        output_columns=[
-            "gestion",
-            "mes",
-            "institucion_id",
-            "disponible_bs",
-            "inversiones_bursatiles_bs",
-            "total_activo",
-            "total_pasivo",
-            "total_patrimonio",
-            "ratio_liquidez",
-            "ratio_endeudamiento",
-        ],
-    ),
-    PredefinedViewMetadata(
-        view_id="solvencia-prudencial-asfi",
-        title="Tablero Prudencial de Solvencia y Apalancamiento (ASFI)",
-        description=(
-            "Evaluación supervisada de coeficiente de solvencia patrimonial, "
-            "peso de cartera sobre activo y apalancamiento financiero."
-        ),
-        category="SUPERVISION",
+        category="CATALOGO_SERIES",
         supported_filters=["gestion", "mes", "institutions", "limit"],
         output_columns=[
             "institucion_id",
             "institucion_nombre",
-            "gestion",
-            "mes",
-            "total_activo",
-            "total_patrimonio",
-            "coeficiente_solvencia",
-            "peso_cartera_activo",
-            "ratio_mora",
-            "apalancamiento_veces",
+            "codigo_serie",
+            "nombre_serie",
+            "tipo_serie",
+            "formato_archivo",
+            "frecuencia_publicacion",
+            "actualizado_hasta",
+            "total_descargas_bruto",
+            "total_reportes_derivados",
+        ],
+    ),
+    PredefinedViewMetadata(
+        view_id="ultimas-descargas-en-bruto",
+        title="Últimos Archivos Descargados en Bruto con Huella SHA-256",
+        description=(
+            "Trazabilidad cronológica de los archivos descargados en bruto desde "
+            "los portales institucionales y DAGs de Airflow hacia el servidor."
+        ),
+        category="DESCARGAS_BRUTO",
+        supported_filters=["gestion", "mes", "institutions", "limit"],
+        output_columns=[
+            "institucion_id",
+            "institucion_nombre",
+            "id_descarga",
+            "codigo_serie",
+            "nombre_serie",
+            "fecha_datos",
+            "fecha_descarga",
+            "estado_descarga",
+            "formato_archivo",
+            "ruta_archivo_bruto",
+            "source_file_sha256",
+        ],
+    ),
+    PredefinedViewMetadata(
+        view_id="reportes-conversiones-y-tablas",
+        title="Reportes Tabulares Extraídos, Tablas Destino y Alertas de Estructura (D_BO_*_xx)",
+        description=(
+            "Relación de reportes extraídos desde archivos en bruto, cantidad de "
+            "conversiones históricas, incidencias estructurales y bases que alimentan."
+        ),
+        category="CONVERSIONES",
+        supported_filters=["gestion", "mes", "institutions", "limit"],
+        output_columns=[
+            "institucion_id",
+            "institucion_nombre",
+            "codigo_reporte",
+            "codigo_serie_madre",
+            "nombre_reporte",
+            "tabla_almacenamiento",
+            "convertido_hasta",
+            "migrado_hasta",
+            "total_conversiones",
+            "incidencias_estructura",
+            "bases_alimentadas",
+        ],
+    ),
+    PredefinedViewMetadata(
+        view_id="bases-consolidadas-y-cubos-spim",
+        title="Bases de Datos Consolidadas (DB_BO_* / S_BO*) y Estado de Cubos",
+        description=(
+            "Catálogo operativo de las 694 bases de datos consolidadas y cubos SPIM, "
+            "sus reportes insumo, fecha de último corte y total de actualizaciones."
+        ),
+        category="BASES_DATOS",
+        supported_filters=["gestion", "mes", "institutions", "limit"],
+        output_columns=[
+            "institucion_id",
+            "institucion_nombre",
+            "codigo_base",
+            "nombre_base",
+            "frecuencia_datos",
+            "datos_desde",
+            "actualizado_hasta",
+            "proxima_actualizacion",
+            "estado_cubo",
+            "reportes_insumo",
+            "total_actualizaciones",
+        ],
+    ),
+    PredefinedViewMetadata(
+        view_id="cobertura-mapa-52-fuentes",
+        title="Cobertura Unificada de Mapas de las 52 Fuentes (Externo ↔ Interno)",
+        description=(
+            "Cruce directo entre los enlaces descubiertos por el Prospector Externo "
+            "en los 52 portales y su estado en custodia documental y bases internas."
+        ),
+        category="MAPA_52_FUENTES",
+        supported_filters=["gestion", "mes", "institutions", "limit"],
+        output_columns=[
+            "institucion_id",
+            "institucion_nombre",
+            "codigo_recurso",
+            "titulo_documento",
+            "url_canonica",
+            "en_custodia_bruto",
+            "consolidado_en_base",
+            "estado_inventario",
+            "actualizado_en",
         ],
     ),
 ]
 
+EXTENDED_VIEWS_CATALOG: list[PredefinedViewMetadata] = [
+    *MULTI_SOURCE_VIEWS_CATALOG,
+    *VIEWS_CATALOG,
+]
+
 VIEW_TO_DATAMART: dict[str, str] = {
+    "series-activas-por-fuente": "catalogo_series_files",
+    "ultimas-descargas-en-bruto": "historial_descargas_bruto",
+    "reportes-conversiones-y-tablas": "reportes_conversiones",
+    "bases-consolidadas-y-cubos-spim": "bases_datos_cubos",
+    "cobertura-mapa-52-fuentes": "mapa_web_52_fuentes",
     "evolucion-mora-temporal": "mart_cartera",
     "ranking-solvencia-cobertura": "mart_cartera",
     "comparativo-entidades-resumen": "mart_cartera",
-    "evolucion-monetaria-bcb": "mart_tasas_bcb",
-    "estados-financieros-bbv": "mart_estadisticas_bbv",
-    "solvencia-prudencial-asfi": "mart_indicadores_asfi",
 }
 
 
 class PredefinedViewsService:
-    """Motor de consulta y orquestación de vistas analíticas predefinidas."""
+    """Motor de consulta y orquestación de vistas predefinidas de autoservicio."""
 
     def __init__(self, base_gold_path: Path | None = None) -> None:
         self._gold_path = base_gold_path or Path("data/gold")
@@ -172,12 +225,12 @@ class PredefinedViewsService:
         self,
         datamart: str | None = None,
     ) -> list[PredefinedViewMetadata]:
-        """Retorna vistas predefinidas (por defecto las 3 estándar o filtradas por repositorio)."""
+        """Retorna vistas predefinidas filtradas por repositorio o todas las vistas."""
         if datamart is None:
             return list(VIEWS_CATALOG)
         dm = datamart.strip().lower()
         if dm == "all":
-            return list(EXTENDED_VIEWS_CATALOG)
+            return list(MULTI_SOURCE_VIEWS_CATALOG)
         return [
             v
             for v in EXTENDED_VIEWS_CATALOG
@@ -188,7 +241,7 @@ class PredefinedViewsService:
         """Obtiene la metadata de una vista predefinida por su identificador."""
         return self._views_map.get(view_id.strip().lower())
 
-    def _resolve_parquet_glob(self, datamart: str = "mart_cartera") -> str | None:
+    def _resolve_parquet_glob(self, datamart: str = "catalogo_series_files") -> str | None:
         mart_dir = self._gold_path / datamart
         if not mart_dir.exists():
             return None
@@ -202,7 +255,7 @@ class PredefinedViewsService:
         view_id: str,
         request: PredefinedViewQueryRequest | None = None,
     ) -> PredefinedViewResult:
-        """Ejecuta una vista analítica aplicando filtros opcionales de forma segura."""
+        """Ejecuta una vista predefinida aplicando filtros opcionales de forma segura."""
         t_start = time.perf_counter()
         clean_id = view_id.strip().lower()
         view_meta = self.get_view(clean_id)
@@ -212,7 +265,7 @@ class PredefinedViewsService:
             )
 
         req = request or PredefinedViewQueryRequest()
-        target_dm = VIEW_TO_DATAMART.get(clean_id, "mart_cartera")
+        target_dm = VIEW_TO_DATAMART.get(clean_id, "catalogo_series_files")
         glob_path = self._resolve_parquet_glob(target_dm)
 
         if not glob_path:
@@ -237,21 +290,29 @@ class PredefinedViewsService:
             params.append(int(req.mes))
 
         if req.institutions:
-            ph = ", ".join(["?"] * len(req.institutions))
-            where_clauses.append(f"institucion_id IN ({ph})")
-            params.extend(req.institutions)
+            upper_insts = [str(i).strip().upper() for i in req.institutions if str(i).strip()]
+            if upper_insts:
+                ph = ", ".join(["?"] * len(upper_insts))
+                where_clauses.append(f"UPPER(institucion_id) IN ({ph})")
+                params.extend(upper_insts)
 
         where_sql = " AND ".join(where_clauses)
         cols_sql = ", ".join(view_meta.output_columns)
 
-        if clean_id in ("evolucion-mora-temporal", "evolucion-monetaria-bcb", "estados-financieros-bbv"):
-            order_sql = "ORDER BY gestion DESC, mes DESC, institucion_id ASC"
-            if clean_id == "evolucion-mora-temporal":
-                order_sql = "ORDER BY gestion ASC, mes ASC, institucion_id ASC"
+        if clean_id == "series-activas-por-fuente":
+            order_sql = "ORDER BY total_descargas_bruto DESC, institucion_id ASC"
+        elif clean_id == "ultimas-descargas-en-bruto":
+            order_sql = "ORDER BY gestion DESC, mes DESC, id_descarga DESC"
+        elif clean_id == "reportes-conversiones-y-tablas":
+            order_sql = "ORDER BY total_conversiones DESC, codigo_reporte ASC"
+        elif clean_id == "bases-consolidadas-y-cubos-spim":
+            order_sql = "ORDER BY total_actualizaciones DESC, codigo_base ASC"
+        elif clean_id == "cobertura-mapa-52-fuentes":
+            order_sql = "ORDER BY institucion_id ASC, codigo_recurso ASC"
+        elif clean_id == "evolucion-mora-temporal":
+            order_sql = "ORDER BY gestion ASC, mes ASC, institucion_id ASC"
         elif clean_id == "ranking-solvencia-cobertura":
             order_sql = "ORDER BY ratio_cobertura DESC, total_patrimonio DESC"
-        elif clean_id == "solvencia-prudencial-asfi":
-            order_sql = "ORDER BY coeficiente_solvencia DESC, total_patrimonio DESC"
         else:
             order_sql = "ORDER BY cartera_bruta DESC, institucion_id ASC"
 
