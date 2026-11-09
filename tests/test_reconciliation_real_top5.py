@@ -38,16 +38,12 @@ from prospector_interno.domain.models import (
 )
 
 
-BBV_MAP_PATH = Path("../prospector_externo/output/bbv/mapa_bbv.json")
-if not BBV_MAP_PATH.exists():
-    BBV_MAP_PATH = Path("prospector_externo/output/bbv/mapa_bbv.json")
-
-
 def test_bbv_reconciliation_diff_classifies_new_and_confirmed(
     tmp_path: Path,
+    bbv_map_path: Path,
 ) -> None:
-    """Verifica la conciliación real de BBV clasificando NEW y CONFIRMED."""
-    assert BBV_MAP_PATH.is_file(), f"El archivo {BBV_MAP_PATH} debe existir"
+    """Verifica la conciliación de BBV clasificando NEW y CONFIRMED."""
+    assert bbv_map_path.is_file(), f"El archivo {bbv_map_path} debe existir"
 
     bronze_storage = LocalBronzeStorage(base_path=tmp_path / "bronze")
     diff_engine = DuckDBDiffEngine(storage=bronze_storage)
@@ -55,7 +51,7 @@ def test_bbv_reconciliation_diff_classifies_new_and_confirmed(
     # 1. Ejecutar diff sobre almacenamiento vacío: todos deben ser NEW
     report_initial = diff_engine.compute_diff(
         source_id="bbv",
-        external_map_path=BBV_MAP_PATH,
+        external_map_path=bbv_map_path,
     )
 
     assert report_initial.source_id == "bbv"
@@ -78,7 +74,7 @@ def test_bbv_reconciliation_diff_classifies_new_and_confirmed(
     # 3. Re-ejecutar diff: el recurso precargado debe ser CONFIRMED
     report_updated = diff_engine.compute_diff(
         source_id="bbv",
-        external_map_path=BBV_MAP_PATH,
+        external_map_path=bbv_map_path,
     )
 
     assert report_updated.total_external_resources == 235

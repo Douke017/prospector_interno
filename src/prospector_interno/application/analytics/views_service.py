@@ -1,4 +1,6 @@
-"""Servicio de ejecución y catálogo de Vistas Analíticas Predefinidas (HUI-22)."""
+"""Servicio de ejecución y catálogo de Vistas Analíticas Predefinidas."""
+
+from __future__ import annotations
 
 import math
 from pathlib import Path
@@ -80,17 +82,107 @@ VIEWS_CATALOG: list[PredefinedViewMetadata] = [
     ),
 ]
 
+EXTENDED_VIEWS_CATALOG: list[PredefinedViewMetadata] = [
+    *VIEWS_CATALOG,
+    PredefinedViewMetadata(
+        view_id="evolucion-monetaria-bcb",
+        title="Evolución Monetaria, Reservas Internacionales e Inflación (BCB)",
+        description=(
+            "Serie cronológica del Banco Central de Bolivia con base monetaria, "
+            "reservas internacionales netas, inflación mensual, bolivianización y UFV."
+        ),
+        category="MONETARIO",
+        supported_filters=["gestion", "mes", "limit"],
+        output_columns=[
+            "gestion",
+            "mes",
+            "institucion_id",
+            "base_monetaria_bs",
+            "emision_monetaria_bs",
+            "reservas_internacionales_usd",
+            "inflacion_mensual_pct",
+            "bolivianizacion_depositos_pct",
+            "ufv_cierre",
+        ],
+    ),
+    PredefinedViewMetadata(
+        view_id="estados-financieros-bbv",
+        title="Liquidez, Inversiones Bursátiles y Solvencia Patrimonial (BBV)",
+        description=(
+            "Evolución mensual de activos corrientes, inversiones bursátiles, "
+            "patrimonio y razones de liquidez y endeudamiento de la BBV S.A."
+        ),
+        category="BURSATIL",
+        supported_filters=["gestion", "mes", "limit"],
+        output_columns=[
+            "gestion",
+            "mes",
+            "institucion_id",
+            "disponible_bs",
+            "inversiones_bursatiles_bs",
+            "total_activo",
+            "total_pasivo",
+            "total_patrimonio",
+            "ratio_liquidez",
+            "ratio_endeudamiento",
+        ],
+    ),
+    PredefinedViewMetadata(
+        view_id="solvencia-prudencial-asfi",
+        title="Tablero Prudencial de Solvencia y Apalancamiento (ASFI)",
+        description=(
+            "Evaluación supervisada de coeficiente de solvencia patrimonial, "
+            "peso de cartera sobre activo y apalancamiento financiero."
+        ),
+        category="SUPERVISION",
+        supported_filters=["gestion", "mes", "institutions", "limit"],
+        output_columns=[
+            "institucion_id",
+            "institucion_nombre",
+            "gestion",
+            "mes",
+            "total_activo",
+            "total_patrimonio",
+            "coeficiente_solvencia",
+            "peso_cartera_activo",
+            "ratio_mora",
+            "apalancamiento_veces",
+        ],
+    ),
+]
+
+VIEW_TO_DATAMART: dict[str, str] = {
+    "evolucion-mora-temporal": "mart_cartera",
+    "ranking-solvencia-cobertura": "mart_cartera",
+    "comparativo-entidades-resumen": "mart_cartera",
+    "evolucion-monetaria-bcb": "mart_tasas_bcb",
+    "estados-financieros-bbv": "mart_estadisticas_bbv",
+    "solvencia-prudencial-asfi": "mart_indicadores_asfi",
+}
+
 
 class PredefinedViewsService:
     """Motor de consulta y orquestación de vistas analíticas predefinidas."""
 
     def __init__(self, base_gold_path: Path | None = None) -> None:
         self._gold_path = base_gold_path or Path("data/gold")
-        self._views_map = {v.view_id: v for v in VIEWS_CATALOG}
+        self._views_map = {v.view_id: v for v in EXTENDED_VIEWS_CATALOG}
 
-    def list_views(self) -> list[PredefinedViewMetadata]:
-        """Retorna el inventario completo de vistas precalculadas."""
-        return list(VIEWS_CATALOG)
+    def list_views(
+        self,
+        datamart: str | None = None,
+    ) -> list[PredefinedViewMetadata]:
+        """Retorna vistas predefinidas (por defecto las 3 estándar o filtradas por repositorio)."""
+        if datamart is None:
+            return list(VIEWS_CATALOG)
+        dm = datamart.strip().lower()
+        if dm == "all":
+            return list(EXTENDED_VIEWS_CATALOG)
+        return [
+            v
+            for v in EXTENDED_VIEWS_CATALOG
+            if VIEW_TO_DATAMART.get(v.view_id) == dm
+        ]
 
     def get_view(self, view_id: str) -> PredefinedViewMetadata | None:
         """Obtiene la metadata de una vista predefinida por su identificador."""
@@ -120,7 +212,8 @@ class PredefinedViewsService:
             )
 
         req = request or PredefinedViewQueryRequest()
-        glob_path = self._resolve_parquet_glob("mart_cartera")
+        target_dm = VIEW_TO_DATAMART.get(clean_id, "mart_cartera")
+        glob_path = self._resolve_parquet_glob(target_dm)
 
         if not glob_path:
             return PredefinedViewResult(
@@ -151,11 +244,14 @@ class PredefinedViewsService:
         where_sql = " AND ".join(where_clauses)
         cols_sql = ", ".join(view_meta.output_columns)
 
-        # Regla de ordenamiento por vista
-        if clean_id == "evolucion-mora-temporal":
-            order_sql = "ORDER BY gestion ASC, mes ASC, institucion_id ASC"
+        if clean_id in ("evolucion-mora-temporal", "evolucion-monetaria-bcb", "estados-financieros-bbv"):
+            order_sql = "ORDER BY gestion DESC, mes DESC, institucion_id ASC"
+            if clean_id == "evolucion-mora-temporal":
+                order_sql = "ORDER BY gestion ASC, mes ASC, institucion_id ASC"
         elif clean_id == "ranking-solvencia-cobertura":
             order_sql = "ORDER BY ratio_cobertura DESC, total_patrimonio DESC"
+        elif clean_id == "solvencia-prudencial-asfi":
+            order_sql = "ORDER BY coeficiente_solvencia DESC, total_patrimonio DESC"
         else:
             order_sql = "ORDER BY cartera_bruta DESC, institucion_id ASC"
 
@@ -169,10 +265,13 @@ class PredefinedViewsService:
         """
 
         con = duckdb.connect(":memory:")
-        con.execute("SET max_memory = '4GB'")
-        cursor = con.execute(sql, params)
-        raw_cols = [c[0] for c in cursor.description]
-        rows = cursor.fetchall()
+        try:
+            con.execute("SET max_memory = '4GB'")
+            cursor = con.execute(sql, params)
+            raw_cols = [c[0] for c in cursor.description]
+            rows = cursor.fetchall()
+        finally:
+            con.close()
 
         records: list[dict[str, Any]] = []
         for row in rows:

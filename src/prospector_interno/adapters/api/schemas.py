@@ -89,6 +89,10 @@ class IngestionEvaluateRequest(BaseModel):
         examples=["ine"],
         description="Identificador opcional de la institución emisor",
     )
+    checksum_sha256: str | None = Field(
+        default=None,
+        description="Huella SHA-256 opcional para validación directa antiduplicidad",
+    )
     force_refresh: bool = Field(default=False)
     request_id: str | None = Field(default=None)
 

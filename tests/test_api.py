@@ -137,11 +137,11 @@ def test_gatekeeper_evaluate_with_aliases_and_omitted_domain() -> None:
     assert data["verdict"] in ("PROCEED_DOWNLOAD", "CACHE_HIT_BRONZE")
 
 
-def test_bridge_sync_dry_run_endpoint() -> None:
+def test_bridge_sync_dry_run_endpoint(finrural_map_path: Path) -> None:
     """Verifica que Bridge /sync en modo dry-run no ejecute descargas."""
     payload = {
         "source_id": "finrural",
-        "external_map_path": "../prospector_externo/output/finrural/mapa_finrural.json",
+        "external_map_path": str(finrural_map_path),
         "batch_size": 5,
         "execute_downloads": False,
     }

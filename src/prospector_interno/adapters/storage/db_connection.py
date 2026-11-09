@@ -126,6 +126,25 @@ def get_database_config(
     )
 
 
+def get_replica_config(read_only: bool = False) -> DatabaseConfig:
+    """Retorna la configuración hacia la réplica PostgreSQL local de DATAX."""
+    host = os.environ.get("PROSPECTOR_PG_HOST", "127.0.0.1")
+    port = int(os.environ.get("PROSPECTOR_PG_PORT", "5434"))
+    database = os.environ.get("PROSPECTOR_PG_DB", "platform_db")
+    user = os.environ.get("PROSPECTOR_PG_USER", "postgres")
+    password = os.environ.get("PROSPECTOR_PG_PASSWORD", "postgres")
+    timeout = int(os.environ.get("PROSPECTOR_PG_TIMEOUT", "2"))
+    return DatabaseConfig(
+        host=host,
+        port=port,
+        database=database,
+        user=user,
+        password=password,
+        connect_timeout=timeout,
+        read_only=read_only,
+    )
+
+
 @contextmanager
 def get_readonly_connection(
     config: DatabaseConfig | None = None,
@@ -138,7 +157,7 @@ def get_readonly_connection(
 
     Args:
         config: Configuración de conexión opcional. Si es None, se obtiene
-            la configuración predeterminada mediante get_database_config().
+            la configuración de réplica local (o .env si FORCE_PROD_DB=1).
 
     Yields:
         Conexión activa de psycopg configurada con row_factory=dict_row.
@@ -146,7 +165,13 @@ def get_readonly_connection(
     Raises:
         LegacySeederError: Si no es posible conectar al servidor de base de datos.
     """
-    cfg = config or get_database_config()
+    if config is not None:
+        cfg = config
+    elif os.environ.get("FORCE_PROD_DB") == "1":
+        cfg = get_database_config(force_prod=True)
+    else:
+        cfg = get_replica_config(read_only=True)
+
     try:
         with psycopg.connect(cfg.conn_info, row_factory=dict_row) as conn:
             conn.read_only = True
@@ -154,5 +179,31 @@ def get_readonly_connection(
     except psycopg.Error as err:
         raise LegacySeederError(
             f"Fallo de conexión de solo lectura a PostgreSQL "
+            f"({cfg.host}:{cfg.port}): {err}"
+        ) from err
+
+
+@contextmanager
+def get_readwrite_connection(
+    config: DatabaseConfig | None = None,
+) -> Generator[psycopg.Connection, None, None]:
+    """Context manager de lectura/escritura hacia la réplica PostgreSQL operativa."""
+    cfg = config or get_replica_config(read_only=False)
+    if cfg.read_only:
+        cfg = DatabaseConfig(
+            host=cfg.host,
+            port=cfg.port,
+            database=cfg.database,
+            user=cfg.user,
+            password=cfg.password,
+            connect_timeout=cfg.connect_timeout,
+            read_only=False,
+        )
+    try:
+        with psycopg.connect(cfg.conn_info, row_factory=dict_row) as conn:
+            yield conn
+    except psycopg.Error as err:
+        raise LegacySeederError(
+            f"Fallo de conexión operativa a PostgreSQL "
             f"({cfg.host}:{cfg.port}): {err}"
         ) from err

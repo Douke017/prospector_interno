@@ -98,6 +98,69 @@ def compile_derivation_sql(
         if institution_id
         else ""
     )
+    dm = datamart.strip().lower()
+
+    if dm == "mart_tasas_bcb":
+        return (
+            "SELECT "
+            "institucion_id, "
+            "institucion_nombre, "
+            f"{breakdown.gestion} AS gestion, "
+            f"'{breakdown.raw_period}' AS periodo_derivado, "
+            "ROUND(AVG(base_monetaria_bs), 2) AS base_monetaria_promedio_bs, "
+            "ROUND(AVG(emision_monetaria_bs), 2) AS emision_monetaria_promedio_bs, "
+            "ROUND(AVG(reservas_internacionales_usd), 2) AS reservas_internacionales_promedio_usd, "
+            "ROUND(SUM(inflacion_mensual_pct), 4) AS inflacion_acumulada_pct, "
+            "ROUND(AVG(bolivianizacion_depositos_pct), 4) AS bolivianizacion_promedio_pct, "
+            "MAX(ufv_cierre) AS ufv_cierre_periodo, "
+            "COUNT(DISTINCT mes) AS meses_agregados "
+            f"FROM read_parquet('{parquet_glob}') "
+            f"WHERE gestion = {breakdown.gestion} AND mes IN ({months_str})"
+            f"{inst_clause} "
+            "GROUP BY institucion_id, institucion_nombre;"
+        )
+
+    if dm == "mart_estadisticas_bbv":
+        return (
+            "SELECT "
+            "institucion_id, "
+            "institucion_nombre, "
+            f"{breakdown.gestion} AS gestion, "
+            f"'{breakdown.raw_period}' AS periodo_derivado, "
+            "ROUND(AVG(disponible_bs), 2) AS disponible_promedio_bs, "
+            "ROUND(AVG(inversiones_bursatiles_bs), 2) AS inversiones_bursatiles_promedio_bs, "
+            "ROUND(AVG(total_activo), 2) AS total_activo_promedio, "
+            "ROUND(AVG(total_pasivo), 2) AS total_pasivo_promedio, "
+            "ROUND(AVG(total_patrimonio), 2) AS total_patrimonio_promedio, "
+            "ROUND(AVG(ratio_liquidez), 4) AS ratio_liquidez_promedio, "
+            "ROUND(AVG(ratio_endeudamiento), 4) AS ratio_endeudamiento_promedio, "
+            "COUNT(DISTINCT mes) AS meses_agregados "
+            f"FROM read_parquet('{parquet_glob}') "
+            f"WHERE gestion = {breakdown.gestion} AND mes IN ({months_str})"
+            f"{inst_clause} "
+            "GROUP BY institucion_id, institucion_nombre;"
+        )
+
+    if dm == "mart_indicadores_asfi":
+        return (
+            "SELECT "
+            "institucion_id, "
+            "institucion_nombre, "
+            f"{breakdown.gestion} AS gestion, "
+            f"'{breakdown.raw_period}' AS periodo_derivado, "
+            "ROUND(AVG(total_activo), 2) AS total_activo_promedio, "
+            "ROUND(AVG(total_patrimonio), 2) AS total_patrimonio_promedio, "
+            "ROUND(AVG(coeficiente_solvencia), 4) AS coeficiente_solvencia_promedio, "
+            "ROUND(AVG(ratio_mora), 4) AS ratio_mora_promedio, "
+            "ROUND(AVG(ratio_cobertura), 4) AS ratio_cobertura_promedio, "
+            "ROUND(AVG(apalancamiento_veces), 4) AS apalancamiento_promedio, "
+            "COUNT(DISTINCT mes) AS meses_agregados "
+            f"FROM read_parquet('{parquet_glob}') "
+            f"WHERE gestion = {breakdown.gestion} AND mes IN ({months_str})"
+            f"{inst_clause} "
+            "GROUP BY institucion_id, institucion_nombre "
+            "ORDER BY coeficiente_solvencia_promedio DESC;"
+        )
 
     return (
         "SELECT "

@@ -268,6 +268,40 @@ class SqliteDownloadTrackingAdapter(DownloadTrackingPort):
             rows = cur.fetchall()
             return [self._row_to_record(r) for r in rows]
 
+    def list_recent_downloads(
+        self,
+        limit: int = 30,
+        source_id: str | None = None,
+    ) -> list[DownloadRecord]:
+        """Lista descargas activas y recientes para monitoreo integral."""
+        with self._lock:
+            cur = self._conn.cursor()
+            if source_id:
+                cur.execute(
+                    """
+                    SELECT * FROM download_tracking
+                    WHERE UPPER(source_id) = UPPER(?)
+                    ORDER BY
+                        CASE WHEN status IN ('DOWNLOADING', 'PENDING') THEN 0 ELSE 1 END,
+                        COALESCE(completed_at, started_at) DESC
+                    LIMIT ?;
+                    """,
+                    (source_id, limit),
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT * FROM download_tracking
+                    ORDER BY
+                        CASE WHEN status IN ('DOWNLOADING', 'PENDING') THEN 0 ELSE 1 END,
+                        COALESCE(completed_at, started_at) DESC
+                    LIMIT ?;
+                    """,
+                    (limit,),
+                )
+            rows = cur.fetchall()
+            return [self._row_to_record(r) for r in rows]
+
     def find_by_checksum(self, sha256_checksum: str) -> DownloadRecord | None:
         """Busca un registro de descarga previa por su hash SHA-256."""
         with self._lock:

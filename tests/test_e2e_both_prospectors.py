@@ -4,14 +4,30 @@ Demuestra la interoperabilidad real entre ambos prospectores utilizando
 los outputs generados por el Prospector Externo en output/finrural/ y output/bbv/.
 """
 
+import io
 import socket
+import sys
 from pathlib import Path
+from typing import BinaryIO
 import pytest
 from starlette.testclient import TestClient
 
 from prospector_interno.adapters.api.main import app
+from prospector_interno.adapters.storage.local_bronze import LocalBronzeStorage
+from prospector_interno.domain.ports import HttpDownloaderPort
 
 client = TestClient(app)
+
+
+class _DeterministicPdfDownloader(HttpDownloaderPort):
+    """Descargador determinista para pruebas E2E aisladas sin mutar red ni disco productivo."""
+
+    def download_to_stream(
+        self,
+        url: str,
+        domain: str,
+    ) -> tuple[BinaryIO, int, str | None]:
+        return io.BytesIO(b"%PDF-1.4\nCONTENIDO_PRUEBA_AISLADA_BBV"), 200, "application/pdf"
 
 
 def _is_external_service_running() -> bool:
@@ -23,15 +39,11 @@ def _is_external_service_running() -> bool:
         return False
 
 
-def test_e2e_reconciliation_bridge_with_finrural() -> None:
+def test_e2e_reconciliation_bridge_with_finrural(finrural_map_path: Path) -> None:
     """Valida el ciclo completo de conciliación con FINRURAL."""
-    map_path = Path("../prospector_externo/output/finrural/mapa_finrural.json")
-    if not map_path.exists():
-        map_path = Path("prospector_externo/output/finrural/mapa_finrural.json")
-
     payload = {
         "source_id": "finrural",
-        "external_map_path": str(map_path),
+        "external_map_path": str(finrural_map_path),
     }
 
     # 1. Ejecutar Diff de Conciliación (HUI-18)
@@ -84,15 +96,25 @@ def test_e2e_sync_execution_pure_rest_with_finrural() -> None:
     assert "completado" in data["summary"].lower()
 
 
-def test_e2e_sync_execution_with_bbv() -> None:
-    """Valida generación y despacho del SyncPlan hacia Bronze con BBV."""
-    map_path = Path("../prospector_externo/output/bbv/mapa_bbv.json")
-    if not map_path.exists():
-        map_path = Path("prospector_externo/output/bbv/mapa_bbv.json")
+def test_e2e_sync_execution_with_bbv(
+    tmp_path: Path,
+    bbv_map_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Valida generación y despacho del SyncPlan hacia Bronze aislado con BBV."""
+    isolated_bronze = LocalBronzeStorage(base_path=tmp_path / "isolated_bronze")
+
+    br_mod = sys.modules["prospector_interno.adapters.api.routers.bridge_router"]
+    monkeypatch.setattr(br_mod._diff_engine, "_storage", isolated_bronze)
+    monkeypatch.setattr(br_mod._sync_orchestrator, "_storage", isolated_bronze)
+    monkeypatch.setattr(br_mod._sync_orchestrator._gatekeeper, "_storage", isolated_bronze)
+    monkeypatch.setattr(
+        br_mod._sync_orchestrator, "_downloader", _DeterministicPdfDownloader()
+    )
 
     payload = {
         "source_id": "bbv",
-        "external_map_path": str(map_path),
+        "external_map_path": str(bbv_map_path),
         "max_downloads": 2,
     }
 
@@ -104,6 +126,7 @@ def test_e2e_sync_execution_with_bbv() -> None:
     assert data["source_id"] == "bbv"
     assert data["total_tasks"] == 2
     assert data["is_executed"] is True
+    assert data["completed_tasks"] == 2
     assert "completado" in data["summary"].lower()
 
 
@@ -118,13 +141,9 @@ def test_e2e_bridge_handles_missing_file_error() -> None:
     assert "No se encontró el mapa" in response.json()["detail"]
 
 
-def test_e2e_reconciliation_bridge_with_bcb() -> None:
+def test_e2e_reconciliation_bridge_with_bcb(bcb_projection_path: Path) -> None:
     """Valida el ciclo E2E de conciliación y simulación Sync con el BCB."""
-    map_path = Path("mapas_externo_last/bcb/datax_projection.json")
-    if not map_path.exists():
-        map_path = Path("../mapas_externo_last/bcb/datax_projection.json")
-    if not map_path.exists():
-        map_path = Path("prospector_externo/output/bcb/mapa_bcb.json")
+    map_path = bcb_projection_path
 
     payload = {
         "source_id": "bcb",

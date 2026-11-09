@@ -17,6 +17,7 @@ htmlcov/
 # Local data & dumps (Do not commit large dumps or temp downloads)
 backup_10.0.0.12
 *.sql
+!migrations/*.sql
 *.tmp*
 data/
 bronze/

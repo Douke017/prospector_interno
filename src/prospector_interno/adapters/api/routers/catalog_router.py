@@ -7,6 +7,7 @@ from fastapi import APIRouter, HTTPException, Query
 
 import psycopg
 
+from prospector_interno.adapters.api import dependencies as deps
 from prospector_interno.adapters.api.schemas import (
     CatalogStatsResponse,
     DatasetResponse,
@@ -14,9 +15,6 @@ from prospector_interno.adapters.api.schemas import (
 )
 from prospector_interno.adapters.storage.db_connection import (
     get_readonly_connection,
-)
-from prospector_interno.adapters.storage.sqlite_catalog_lineage import (
-    SqliteLineageAdapter,
 )
 from prospector_interno.application.catalog.asset_catalog_service import (
     AssetCatalogService,
@@ -104,11 +102,9 @@ def _get_catalog_source(conn: psycopg.Connection, alias: str = "") -> str:
     return table_name if has_mv else f"{table_name} AS mv_nexus_active_catalog"
 
 
-_default_lineage_adapter = SqliteLineageAdapter(
-    Path("data/catalog/datax_catalog.db")
-)
-_lineage_tracker = LineageTracker(_default_lineage_adapter)
-_catalog_service = AssetCatalogService(_default_lineage_adapter)
+_default_lineage_adapter = deps.lineage_adapter
+_lineage_tracker = deps.lineage_tracker
+_catalog_service = deps.asset_catalog_service
 
 
 def get_lineage_tracker() -> LineageTracker:
@@ -568,28 +564,67 @@ def get_asset_lineage(asset_id: str) -> AssetLineageGraphResponse:
 @router.get(
     "/assets/{asset_id}/verify",
     response_model=LineageIntegrityCheckResult,
-    summary="Auditar integridad criptográfica de un activo y sus insumos (HUI-17)",
-    description=(
-        "Recalcula en tiempo real los hashes SHA-256 de los archivos en disco "
-        "y los compara contra los registros inmutables de la cadena de custodia."
-    ),
+    summary="Auditar integridad criptográfica de un activo y sus insumos",
 )
 def verify_asset_integrity(
     asset_id: str,
     bronze_dir: str | None = Query(
-        default="data/bronze",
+        default=None,
         description="Directorio base de insumos Bronze para validación cruzada",
     ),
 ) -> LineageIntegrityCheckResult:
     """Verifica la integridad criptográfica de un activo y sus insumos."""
     tracker = get_lineage_tracker()
+    resolved_bronze = Path(bronze_dir) if bronze_dir else deps.BRONZE_DIR
     try:
         return tracker.verify_asset_integrity(
             asset_id=asset_id,
-            base_bronze_dir=Path(bronze_dir) if bronze_dir else None,
+            base_bronze_dir=resolved_bronze,
         )
     except EntityNotFoundError as err:
         raise HTTPException(
             status_code=404,
             detail=f"Activo '{asset_id}' no encontrado para verificación.",
         ) from err
+
+
+@router.get(
+    "/lineage/datamart/{datamart_name}",
+    response_model=list[dict[str, Any]],
+    summary="Consultar trazabilidad documental completa de un repositorio Gold",
+)
+def get_datamart_lineage(
+    datamart_name: str,
+    limit: int = Query(default=100, ge=1, le=500),
+) -> list[dict[str, Any]]:
+    """Retorna todos los vínculos criptográficos Gold -> Bronze de un repositorio."""
+    tracker = get_lineage_tracker()
+    repo = tracker._repository
+    if hasattr(repo, "list_lineage_for_datamart"):
+        return repo.list_lineage_for_datamart(datamart_name=datamart_name, limit=limit)
+
+    spec = AssetSpecification.all().by_dataset(datamart_name)
+    assets = get_asset_catalog_service().find_assets(spec)
+    out: list[dict[str, Any]] = []
+    for a in assets:
+        for l_rec in repo.get_lineage_by_asset(a.asset_id):
+            out.append(
+                {
+                    "asset_id": a.asset_id,
+                    "datamart_name": a.dataset_id,
+                    "source_id": a.source_id,
+                    "period_start": a.period_start,
+                    "row_count": a.row_count,
+                    "gold_sha256": a.content_hash_sha256,
+                    "lineage_id": l_rec.lineage_id,
+                    "bronze_source_file": l_rec.bronze_source_file,
+                    "bronze_file_sha256": l_rec.bronze_file_sha256,
+                    "external_run_id": l_rec.external_run_id,
+                    "pipeline_version": l_rec.pipeline_version,
+                    "transformed_at": l_rec.transformed_at.isoformat(),
+                    "canonical_url": None,
+                }
+            )
+            if len(out) >= limit:
+                return out
+    return out

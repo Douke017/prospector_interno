@@ -1,12 +1,11 @@
-"""Router para el Reconciliation & Sync Bridge (HUI-18 y HUI-19).
+"""Router para Conciliación e Integración entre Prospectores."""
 
-Permite conciliar el inventario del Prospector Interno con los descubrimientos
-del Prospector Externo usando DuckDB y ejecutar el SyncPlan hacia Bronze.
-"""
+from __future__ import annotations
 
 from pathlib import Path
 from fastapi import APIRouter, HTTPException
 
+from prospector_interno.adapters.api import dependencies as deps
 from prospector_interno.adapters.api.schemas import (
     BridgeReconcileRequest,
     BridgeReconcileResponse,
@@ -19,13 +18,10 @@ from prospector_interno.adapters.downloader.circuit_breaker import (
 from prospector_interno.adapters.downloader.resumable_stream_downloader import (
     ResumableStreamDownloader,
 )
-from prospector_interno.adapters.memory_state import InMemoryGatekeeperState
-from prospector_interno.adapters.storage.local_bronze import LocalBronzeStorage
 from prospector_interno.application.bridge.diff_engine import DuckDBDiffEngine
 from prospector_interno.application.bridge.sync_orchestrator import (
     SyncOrchestrator,
 )
-from prospector_interno.application.gatekeeper import PreFlightGatekeeper
 from prospector_interno.application.scheduler import DomainTokenBucket
 from prospector_interno.domain.contracts.downloader_spec import (
     DomainCircuitStatus,
@@ -39,10 +35,8 @@ from prospector_interno.domain.exceptions import (
 
 router = APIRouter(prefix="/bridge", tags=["5. Reconciliation & Sync Bridge"])
 
-# Instancias compartidas del Bridge
-_storage = LocalBronzeStorage(base_path=Path("data/bronze"))
-_state = InMemoryGatekeeperState()
-_gatekeeper = PreFlightGatekeeper(storage=_storage, state_registry=_state)
+_storage = deps.bronze_storage
+_gatekeeper = deps.gatekeeper
 _rate_limiter = DomainTokenBucket(default_rate=2.0, default_capacity=5.0)
 _circuit_breaker = DomainCircuitBreaker(default_cooldown_seconds=300.0)
 _downloader = ResumableStreamDownloader(
@@ -55,22 +49,20 @@ _sync_orchestrator = SyncOrchestrator(
     gatekeeper=_gatekeeper,
     storage=_storage,
     downloader=_downloader,
+    download_tracking=deps.download_tracking,
+    url_inventory_repo=deps.url_inventory_repo,
 )
 
 
 @router.post(
     "/reconcile",
     response_model=BridgeReconcileResponse,
-    summary="Ejecutar Diff con DuckDB (HUI-18)",
-    description=(
-        "Compara las URLs descubiertas en el mapa del Prospector Externo "
-        "contra el almacenamiento local en Capa Bronze y categoriza discrepancias."
-    ),
+    summary="Ejecutar conciliación entre catálogo externo y custodia local",
 )
 def reconcile_external_map(
     request: BridgeReconcileRequest,
 ) -> BridgeReconcileResponse:
-    """Ejecuta el diff vectorizado entre el JSON externo y Capa Bronze."""
+    """Ejecuta el cruce vectorizado entre el Prospector Externo y Capa Bronze."""
     map_path = (
         Path(request.external_map_path) if request.external_map_path else None
     )
@@ -106,16 +98,12 @@ def reconcile_external_map(
 @router.post(
     "/sync",
     response_model=BridgeSyncResponse,
-    summary="Generar y ejecutar SyncPlan hacia Bronze (HUI-19)",
-    description=(
-        "Crea el plan de sincronización priorizado y descarga ordenadamente "
-        "los recursos faltantes pasando por el Gatekeeper hacia Capa Bronze."
-    ),
+    summary="Generar y ejecutar plan de sincronización hacia custodia Bronze",
 )
 def execute_sync_plan(
     request: BridgeSyncRequest,
 ) -> BridgeSyncResponse:
-    """Genera el SyncPlan priorizado y ejecuta la ingesta masiva protegida."""
+    """Genera el plan priorizado y ejecuta la transferencia protegida hacia Bronze."""
     map_path = (
         Path(request.external_map_path) if request.external_map_path else None
     )
@@ -127,8 +115,7 @@ def execute_sync_plan(
         )
         full_plan = _sync_orchestrator.create_plan(report)
 
-        # Acotar tareas al límite solicitado para control de ejecución
-        limited_items = full_plan.items[:request.max_downloads]
+        limited_items = full_plan.items[: request.max_downloads]
         plan_to_run = full_plan.model_copy(
             update={"items": limited_items, "total_tasks": len(limited_items)}
         )
@@ -148,48 +135,10 @@ def execute_sync_plan(
                 summary=summary,
             )
 
-        executed_plan = _sync_orchestrator.execute_plan(plan_to_run)
-
-        # Actualizar base de datos de control e inventario (url_inventory_map) con la custodia real
-        try:
-            from prospector_interno.adapters.api.routers.inventory_router import _get_conn
-            with _get_conn() as conn:
-                for task in executed_plan.items:
-                    if task.status in ("COMPLETED", "SKIPPED_CACHE_HIT") and task.downloaded_artifact:
-                        artifact = task.downloaded_artifact
-                        cursor = conn.cursor()
-                        cursor.execute(
-                            """
-                            UPDATE url_inventory_map
-                            SET is_downloaded = 1,
-                                sha256_hash = ?,
-                                storage_path = ?,
-                                status = 'COMPLETED',
-                                updated_at = CURRENT_TIMESTAMP
-                            WHERE canonical_url = ?
-                            """,
-                            (artifact.sha256_hash, str(artifact.file_path), task.url)
-                        )
-                        if cursor.rowcount == 0:
-                            cursor.execute(
-                                """
-                                INSERT INTO url_inventory_map (
-                                    source_id, file_name, canonical_url,
-                                    is_discovered_web, is_downloaded, is_processed,
-                                    sha256_hash, storage_path, status
-                                ) VALUES (?, ?, ?, 1, 1, 0, ?, ?, 'COMPLETED')
-                                """,
-                                (
-                                    executed_plan.source_id,
-                                    f"doc_{artifact.sha256_hash[:8]}",
-                                    task.url,
-                                    artifact.sha256_hash,
-                                    str(artifact.file_path),
-                                )
-                            )
-                conn.commit()
-        except Exception:
-            pass
+        executed_plan = _sync_orchestrator.execute_plan(
+            plan_to_run,
+            external_api_url=request.external_api_url,
+        )
 
         summary = (
             f"Resguardo completado para {executed_plan.source_id.upper()}: "
@@ -217,10 +166,6 @@ def execute_sync_plan(
 @router.get(
     "/artifacts",
     summary="Listar inventario de artefactos en Capa Bronze",
-    description=(
-        "Devuelve la lista física de archivos resguardados en Capa Bronze "
-        "con sus firmas criptográficas SHA-256."
-    ),
 )
 def list_bronze_artifacts(source_id: str | None = None) -> list[dict]:
     """Retorna el inventario físico de archivos custodiados en Bronze."""
@@ -230,11 +175,7 @@ def list_bronze_artifacts(source_id: str | None = None) -> list[dict]:
 @router.get(
     "/circuit-breaker/{domain}",
     response_model=DomainCircuitStatus,
-    summary="Consultar estado del disyuntor para un dominio (HUI-09)",
-    description=(
-        "Permite observar si un dominio está CLOSED (operativo), "
-        "OPEN (en enfriamiento tras 429/503) o HALF_OPEN."
-    ),
+    summary="Consultar estado del disyuntor para un dominio",
 )
 def get_circuit_breaker_status(domain: str) -> DomainCircuitStatus:
     """Devuelve los metadatos y tiempo restante de enfriamiento."""
@@ -243,8 +184,7 @@ def get_circuit_breaker_status(domain: str) -> DomainCircuitStatus:
 
 @router.post(
     "/circuit-breaker/{domain}/reset",
-    summary="Restablecer manualmente el disyuntor de un dominio (HUI-09)",
-    description="Fuerza el retorno del circuito a CLOSED para un portal.",
+    summary="Restablecer manualmente el disyuntor de un dominio",
 )
 def reset_circuit_breaker(domain: str) -> dict[str, str]:
     """Restablece el disyuntor para el dominio indicado."""

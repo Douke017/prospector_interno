@@ -13,6 +13,8 @@ from prospector_interno.domain.models import BronzeArtifact
 class SilverTransformPipeline:
     """Pipeline orquestador para procesar artefactos de Bronze a Silver."""
 
+    _CACHE: dict[tuple[str, str, int], list[SilverFinancialRecord]] = {}
+
     def __init__(self) -> None:
         self._finrural_parser = FinruralPdfParser()
 
@@ -24,13 +26,23 @@ class SilverTransformPipeline:
         path = Path(artifact.file_path)
         if not path.exists():
             return []
+        try:
+            mtime_ns = path.stat().st_mtime_ns
+        except OSError:
+            return []
+        cache_key = (str(path.resolve()), artifact.sha256_hash, mtime_ns)
+        cached = self._CACHE.get(cache_key)
+        if cached is not None:
+            return list(cached)
 
         # Enrutamiento según el dominio y tipo de documento
         if "finrural" in artifact.domain:
-            return self._finrural_parser.parse_cuadro_patrimonial(
+            res = self._finrural_parser.parse_cuadro_patrimonial(
                 pdf_path=path,
                 source_file_sha256=artifact.sha256_hash,
             )
+            self._CACHE[cache_key] = res
+            return list(res)
 
         return []
 

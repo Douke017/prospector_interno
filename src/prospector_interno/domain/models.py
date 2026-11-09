@@ -91,6 +91,7 @@ class IngestionRequest(BaseModel):
         ...,
         description="Identificador del periodo (ej. '2026-08', '2026-Q2')",
     )
+    checksum_sha256: str | None = None
     force_refresh: bool = False
     requested_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc)

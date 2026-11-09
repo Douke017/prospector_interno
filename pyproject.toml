@@ -4,16 +4,21 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "prospector-interno"
-version = "0.1.0"
-description = "Plataforma Analítica e Ingesta Masiva Resiliente (DATAX Equipo 2 - Target: Portal Nexus)"
+version = "1.0.0"
+description = "Arquitectura de Gestión, Custodia y Prospección Interna de Datos Financieros — DATAX"
 authors = [
-    { name = "DATAX Architecture Team", email = "architecture@datax.local" }
+    { name = "DATAX Engineering", email = "ingenieria@datax.com.bo" }
 ]
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "pydantic>=2.10.0",
     "psycopg[binary]>=3.2.0",
+    "fastapi>=0.115.0",
+    "uvicorn>=0.30.0",
+    "duckdb>=1.1.0",
+    "openpyxl>=3.1.5",
+    "httpx>=0.27.0",
 ]
 
 [project.optional-dependencies]

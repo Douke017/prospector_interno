@@ -40,35 +40,86 @@ class LocalBronzeStorage(BronzeStoragePort):
         self._index_by_key: dict[str, BronzeArtifact] = {}
         self._load_manifest()
 
+    def _resolve_stored_path(self, raw_file_path: str, sha256_hash: str) -> Path:
+        """Resuelve rutas relativas de manifiestos independientemente del CWD."""
+        raw_path = Path(raw_file_path)
+        if raw_path.exists():
+            return raw_path.resolve()
+        posix_raw = raw_path.as_posix()
+        if "bronze/" in posix_raw:
+            rel_tail = posix_raw.split("bronze/", 1)[1]
+            candidate = self._base_path / rel_tail
+            if candidate.exists():
+                return candidate.resolve()
+        matches = list(self._base_path.glob(f"**/{sha256_hash}.dat"))
+        if matches:
+            return matches[0].resolve()
+        return raw_path
+
     def _load_manifest(self) -> None:
         """Carga el índice persistido de artefactos de Capa Bronze si existe."""
-        if not self._manifest_file.exists():
-            return
+        if self._manifest_file.exists():
+            try:
+                with open(self._manifest_file, "r", encoding="utf-8") as f_in:
+                    data = json.load(f_in)
+                for entry in data.get("artifacts", []):
+                    resolved_fp = self._resolve_stored_path(
+                        entry["file_path"],
+                        entry["sha256_hash"],
+                    )
+                    art = BronzeArtifact(
+                        artifact_id=entry["artifact_id"],
+                        dataset_code=entry["dataset_code"],
+                        domain=entry["domain"],
+                        file_path=resolved_fp,
+                        sha256_hash=entry["sha256_hash"],
+                        size_bytes=entry["size_bytes"],
+                        downloaded_at=datetime.fromisoformat(entry["downloaded_at"]),
+                        http_status=entry.get("http_status", 200),
+                        content_type=entry.get("content_type"),
+                    )
+                    period = entry.get("period", "")
+                    self._index_by_period[(art.domain, art.dataset_code, period)] = art
+                    self._index_by_checksum[art.sha256_hash] = art
+                    url = entry.get("url")
+                    if url:
+                        self._index_by_url[url] = art
+                    r_key = entry.get("resource_key")
+                    if r_key:
+                        self._index_by_key[r_key] = art
+            except Exception:
+                pass
+
+        # Indexar archivos .dat físicos en disco que no figuren aún en el manifiesto
         try:
-            with open(self._manifest_file, "r", encoding="utf-8") as f_in:
-                data = json.load(f_in)
-            for entry in data.get("artifacts", []):
-                art = BronzeArtifact(
-                    artifact_id=entry["artifact_id"],
-                    dataset_code=entry["dataset_code"],
-                    domain=entry["domain"],
-                    file_path=Path(entry["file_path"]),
-                    sha256_hash=entry["sha256_hash"],
-                    size_bytes=entry["size_bytes"],
-                    downloaded_at=datetime.fromisoformat(entry["downloaded_at"]),
-                    http_status=entry.get("http_status", 200),
-                    content_type=entry.get("content_type"),
-                )
-                period = entry.get("period", "")
-                self._index_by_period[(art.domain, art.dataset_code, period)] = art
-                self._index_by_checksum[art.sha256_hash] = art
-                url = entry.get("url")
-                if url:
-                    self._index_by_url[url] = art
-                r_key = entry.get("resource_key")
-                if r_key:
-                    self._index_by_key[r_key] = art
-        except Exception:
+            for dat_file in self._base_path.glob("*/*/*/*.dat"):
+                if dat_file.name.startswith(".tmp."):
+                    continue
+                checksum = dat_file.stem
+                if len(checksum) == 64 and checksum not in self._index_by_checksum:
+                    st = dat_file.stat()
+                    domain_dir = dat_file.parent.parent.parent.name
+                    year_dir = dat_file.parent.parent.name
+                    month_dir = dat_file.parent.name
+                    ds_code = f"DS_BO_{domain_dir.replace('www.', '').split('.')[0].upper()}"
+                    recovered = BronzeArtifact(
+                        artifact_id=f"bronze_{checksum[:16]}",
+                        dataset_code=ds_code,
+                        domain=domain_dir,
+                        file_path=dat_file.resolve(),
+                        sha256_hash=checksum,
+                        size_bytes=st.st_size,
+                        downloaded_at=datetime.fromtimestamp(st.st_mtime, tz=timezone.utc),
+                        http_status=200,
+                    )
+                    self._index_by_checksum[checksum] = recovered
+                    if len(year_dir) == 4 and year_dir.isdigit() and month_dir.isdigit():
+                        rec_period = f"{int(year_dir):04d}-{int(month_dir):02d}"
+                        self._index_by_period.setdefault(
+                            (recovered.domain, recovered.dataset_code, rec_period),
+                            recovered,
+                        )
+        except OSError:
             pass
 
     def _save_manifest_entry(
@@ -282,25 +333,54 @@ class LocalBronzeStorage(BronzeStoragePort):
 
     def get_all_artifacts(self, source_id: str | None = None) -> list[dict]:
         """Obtiene la lista de artefactos persistidos físicamente en Bronze."""
-        if not self._manifest_file.exists():
-            return []
-        try:
-            with open(self._manifest_file, "r", encoding="utf-8") as f_in:
-                data = json.load(f_in)
-            artifacts = data.get("artifacts", [])
-            if source_id:
-                src_low = source_id.lower()
-                src_upper = source_id.upper()
-                artifacts = [
-                    art for art in artifacts
-                    if (
-                        src_low in art.get("domain", "").lower()
-                        or src_upper in art.get("dataset_code", "").upper()
-                        or src_low in art.get("dataset_code", "").lower()
-                    )
-                ]
-            # Devolver en orden cronológico inverso (los más recientes primero)
-            artifacts.reverse()
-            return artifacts
-        except Exception:
-            return []
+        by_sha: dict[str, dict] = {}
+        if self._manifest_file.exists():
+            try:
+                with open(self._manifest_file, "r", encoding="utf-8") as f_in:
+                    data = json.load(f_in)
+                for entry in data.get("artifacts", []):
+                    sha = entry.get("sha256_hash", "")
+                    if not sha:
+                        continue
+                    resolved_fp = self._resolve_stored_path(entry.get("file_path", ""), sha)
+                    item = dict(entry)
+                    item["file_path"] = str(resolved_fp)
+                    by_sha[sha] = item
+            except Exception:
+                pass
+
+        for sha, art in self._index_by_checksum.items():
+            if sha not in by_sha:
+                fp = Path(art.file_path)
+                inferred_period = ""
+                if len(fp.parts) >= 3 and fp.parent.parent.name.isdigit() and fp.parent.name.isdigit():
+                    inferred_period = f"{int(fp.parent.parent.name):04d}-{int(fp.parent.name):02d}"
+                by_sha[sha] = {
+                    "artifact_id": art.artifact_id,
+                    "dataset_code": art.dataset_code,
+                    "domain": art.domain,
+                    "file_path": str(art.file_path),
+                    "sha256_hash": art.sha256_hash,
+                    "size_bytes": art.size_bytes,
+                    "downloaded_at": art.downloaded_at.isoformat(),
+                    "http_status": art.http_status,
+                    "content_type": art.content_type,
+                    "period": inferred_period,
+                    "url": None,
+                    "resource_key": None,
+                }
+
+        artifacts = list(by_sha.values())
+        if source_id:
+            src_low = source_id.lower()
+            src_upper = source_id.upper()
+            artifacts = [
+                art for art in artifacts
+                if (
+                    src_low in art.get("domain", "").lower()
+                    or src_upper in art.get("dataset_code", "").upper()
+                    or src_low in art.get("dataset_code", "").lower()
+                )
+            ]
+        artifacts.reverse()
+        return artifacts

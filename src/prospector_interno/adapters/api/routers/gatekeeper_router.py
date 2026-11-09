@@ -1,25 +1,18 @@
-"""Router del Pre-flight Gatekeeper para cache hits, locks y derivación."""
+"""Router del Control Previo de Solicitudes (Gatekeeper)."""
 
+from __future__ import annotations
 
-from pathlib import Path
 from urllib.parse import urlparse
 import uuid
 from fastapi import APIRouter
 
-from prospector_interno.adapters.analytics.duckdb_analytics_adapter import (
-    DuckDBGoldPartitionAdapter,
-)
+from prospector_interno.adapters.api import dependencies as deps
 from prospector_interno.adapters.api.schemas import (
     IngestionEvaluateRequest,
     IngestionEvaluateResponse,
 )
-from prospector_interno.adapters.memory_state import InMemoryGatekeeperState
 from prospector_interno.adapters.resilience.bulkhead_manager import (
     get_bulkhead_manager,
-)
-from prospector_interno.adapters.storage.local_bronze import LocalBronzeStorage
-from prospector_interno.adapters.storage.sqlite_download_tracking import (
-    SqliteDownloadTrackingAdapter,
 )
 from prospector_interno.application.gatekeeper import PreFlightGatekeeper
 from prospector_interno.domain.contracts.bulkhead_spec import BulkheadStats
@@ -37,24 +30,14 @@ from prospector_interno.domain.models import IngestionRequest
 
 router = APIRouter(prefix="/gatekeeper", tags=["2. Pre-flight Gatekeeper"])
 
-# Instancias compartidas para el runtime de la API
-_storage = LocalBronzeStorage(base_path=Path("data/bronze"))
-_state = InMemoryGatekeeperState()
-_gold_checker = DuckDBGoldPartitionAdapter(base_gold_path=Path("data/gold"))
-_derivation_filter = AssetDerivationFilter(
-    partition_checker=_gold_checker,
-    base_gold_path=Path("data/gold"),
-)
-_download_tracking = SqliteDownloadTrackingAdapter(
-    db_path=Path("data/catalog/datax_catalog.db")
-)
-_download_state_filter = DownloadStateFilter(tracking_port=_download_tracking)
-_gatekeeper = PreFlightGatekeeper(
-    storage=_storage,
-    state_registry=_state,
-    derivation_filter=_derivation_filter,
-    download_state_filter=_download_state_filter,
-)
+# Referencias compartidas con soporte de inyección para pruebas
+_storage = deps.bronze_storage
+_state = deps.gatekeeper_state
+_gold_checker = deps.gold_partition_checker
+_derivation_filter = deps.derivation_filter
+_download_tracking = deps.download_tracking
+_download_state_filter = deps.download_state_filter
+_gatekeeper = deps.gatekeeper
 
 
 def set_gatekeeper(gatekeeper: PreFlightGatekeeper) -> None:
@@ -78,31 +61,47 @@ def set_download_state_filter(filter_instance: DownloadStateFilter) -> None:
 @router.post(
     "/evaluate",
     response_model=IngestionEvaluateResponse,
-    summary="Evaluar solicitud antes de descarga (HUI-01/HUI-02/HUI-04)",
+    summary="Evaluar solicitud de procesamiento antes de descarga",
     description=(
-
-        "Verifica si el artefacto es derivable de Capa Gold (REUSE_DERIVATION), "
-        "si ya existe en Bronze (CACHE_HIT_BRONZE), o si está bloqueado en vuelo."
+        "Verifica si la información solicitada ya existe en reportes consolidados, "
+        "si puede derivarse desde insumos existentes, si ya está custodiada en Bronze "
+        "o si se encuentra en cola/descarga activa."
     ),
 )
 def evaluate_ingestion(
     request: IngestionEvaluateRequest,
 ) -> IngestionEvaluateResponse:
-    """Ejecuta las reglas de pre-vuelo para prevenir tráfico de red redundante."""
+    """Ejecuta las reglas de control previo para prevenir procesamiento redundante."""
     req_id = request.request_id or f"req-{uuid.uuid4().hex[:8]}"
 
     domain = request.domain
     if not domain and request.target_url:
         domain = urlparse(request.target_url).netloc
     if not domain and request.source_id:
-        domain = f"www.{request.source_id}.gob.bo"
+        src_clean = request.source_id.strip().lower()
+        if src_clean == "finrural":
+            domain = "www.finrural.org.bo"
+        elif src_clean == "bbv":
+            domain = "www.bbv.com.bo"
+        else:
+            domain = f"www.{src_clean}.gob.bo"
     if not domain:
         domain = "portal.gob.bo"
 
-    target_url = (
-        request.target_url
-        or f"https://{domain}/data/{request.dataset_code}_{request.period}.xlsx"
-    )
+    target_url = request.target_url
+    if not target_url and deps.url_inventory_repo is not None:
+        try:
+            target_url = deps.url_inventory_repo.find_canonical_url(
+                dataset_code=request.dataset_code,
+                source_id=request.source_id,
+                period=request.period,
+                domain=domain,
+            )
+        except Exception:
+            target_url = None
+
+    if not target_url:
+        target_url = f"https://{domain}/data/{request.dataset_code}_{request.period}.xlsx"
 
     domain_request = IngestionRequest(
         request_id=req_id,
@@ -110,6 +109,7 @@ def evaluate_ingestion(
         domain=domain,
         target_url=target_url,
         period=request.period,
+        checksum_sha256=request.checksum_sha256,
         force_refresh=request.force_refresh,
     )
 
@@ -140,17 +140,16 @@ def evaluate_ingestion(
 @router.post(
     "/inspect",
     response_model=DerivationEvaluationResult,
-    summary="Inspeccionar derivabilidad de periodos macro sobre Capa Gold (HUI-02)",
+    summary="Evaluar reutilización de insumos consolidados sobre Capa Gold",
     description=(
-        "Evalúa si un periodo macro (anual, trimestral, semestral) puede "
-        "construirse agregando particiones mensuales en Gold sin requerir descargas. "
-        "Si faltan periodos, retorna la lista exacta de insumos pendientes."
+        "Evalúa si un periodo agregado (anual, semestral o trimestral) puede "
+        "construirse reutilizando particiones mensuales ya consolidadas en Gold."
     ),
 )
 def inspect_derivation(
     request: DerivationEvaluationRequest,
 ) -> DerivationEvaluationResult:
-    """Inspecciona la cobertura de particiones aislada en pool Gatekeeper (HUI-23)."""
+    """Inspecciona la cobertura de particiones aislada en pool Gatekeeper."""
     bulkhead = get_bulkhead_manager()
     return bulkhead.execute_gatekeeper(_derivation_filter.evaluate, request)
 
@@ -158,9 +157,9 @@ def inspect_derivation(
 @router.get(
     "/bulkhead/stats",
     response_model=BulkheadStats,
-    summary="Métricas de aislamiento de hilos y memoria (HUI-23)",
-    description="Retorna el estado de los pools de workers y presupuesto de RAM.",
+    summary="Métricas de aislamiento de hilos y memoria",
+    description="Retorna el estado de los pools de ejecución y presupuesto de memoria.",
 )
 def get_bulkhead_metrics() -> BulkheadStats:
-    """Retorna métricas del pool Bulkhead en tiempo real."""
+    """Retorna métricas operativas en tiempo real."""
     return get_bulkhead_manager().get_stats()

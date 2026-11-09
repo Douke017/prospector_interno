@@ -33,15 +33,12 @@ def test_compute_diff_missing_file_raises_error(
 
 def test_compute_diff_with_real_bbv_external_map(
     diff_engine: DuckDBDiffEngine,
+    bbv_map_path: Path,
 ) -> None:
-    """Verifica HUI-18 procesando el mapa real del Prospector Externo para BBV."""
-    bbv_map = Path("../prospector_externo/output/bbv/mapa_bbv.json")
-    if not bbv_map.exists():
-        bbv_map = Path("prospector_externo/output/bbv/mapa_bbv.json")
-
+    """Verifica HUI-18 procesando el mapa del Prospector Externo para BBV."""
     report = diff_engine.compute_diff(
         source_id="bbv",
-        external_map_path=bbv_map,
+        external_map_path=bbv_map_path,
     )
 
     assert report.source_id == "bbv"
@@ -54,12 +51,9 @@ def test_compute_diff_with_real_bbv_external_map(
 def test_compute_diff_classifies_confirmed_when_in_storage(
     diff_engine: DuckDBDiffEngine,
     bronze_storage: LocalBronzeStorage,
+    finrural_map_path: Path,
 ) -> None:
     """Verifica que recursos ya presentes en Capa Bronze se clasifican CONFIRMED."""
-    finrural_map = Path("../prospector_externo/output/finrural/mapa_finrural.json")
-    if not finrural_map.exists():
-        finrural_map = Path("prospector_externo/output/finrural/mapa_finrural.json")
-
     # Precargar un recurso específico en Bronze coincidente con el periodo '2026-01'
     artifact = BronzeArtifact(
         artifact_id="bronze_test_mock_finrural",
@@ -73,7 +67,7 @@ def test_compute_diff_classifies_confirmed_when_in_storage(
 
     report = diff_engine.compute_diff(
         source_id="finrural",
-        external_map_path=finrural_map,
+        external_map_path=finrural_map_path,
     )
 
     assert report.source_id == "finrural"
@@ -91,20 +85,12 @@ def test_compute_diff_classifies_confirmed_when_in_storage(
 
 def test_compute_diff_with_supervisor_canonical_bcb_csv(
     diff_engine: DuckDBDiffEngine,
+    bcb_canonical_csv_path: Path,
 ) -> None:
     """Verifica que DuckDB procese el CSV canónico entregado por el supervisor."""
-    base_dir = Path("/home/douke017/Datax/archivos_prospector_interno")
-    candidate_paths = [
-        Path("../archivos_prospector_interno/bcb_mapa_interno_canonico_v1.csv"),
-        Path("archivos_prospector_interno/bcb_mapa_interno_canonico_v1.csv"),
-        base_dir / "bcb_mapa_interno_canonico_v1.csv",
-    ]
-    target_csv = next((p for p in candidate_paths if p.exists()), None)
-    assert target_csv is not None
-
     report = diff_engine.compute_diff(
         source_id="bcb",
-        external_map_path=target_csv,
+        external_map_path=bcb_canonical_csv_path,
     )
 
     assert report.source_id == "bcb"
@@ -159,17 +145,14 @@ def test_compute_diff_via_rest_client(
 
 def test_compute_diff_with_bcb_datax_projection(
     diff_engine: DuckDBDiffEngine,
+    bcb_projection_path: Path,
 ) -> None:
     """Verifica que DuckDBDiffEngine procese datax_projection.json del BCB (527 recursos)."""
-    bcb_projection = Path("mapas_externo_last/bcb/datax_projection.json")
-    if not bcb_projection.exists():
-        bcb_projection = Path("../mapas_externo_last/bcb/datax_projection.json")
-
-    assert bcb_projection.exists(), "El mapa de proyección del BCB debe existir"
+    assert bcb_projection_path.exists(), "El mapa de proyección del BCB debe existir"
 
     report = diff_engine.compute_diff(
         source_id="bcb",
-        external_map_path=bcb_projection,
+        external_map_path=bcb_projection_path,
     )
 
     assert report.source_id == "bcb"
@@ -182,10 +165,16 @@ def test_compute_diff_with_bcb_datax_projection(
 
 def test_compute_diff_auto_discovers_bcb_projection(
     bronze_storage: LocalBronzeStorage,
+    bcb_projection_path: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Verifica que compute_diff auto-descubra mapas_externo_last/bcb cuando no se pasa path."""
     from unittest.mock import create_autospec
     from prospector_interno.domain.ports import ExternalCatalogClientPort
+
+    assert bcb_projection_path.exists()
+    monkeypatch.chdir(tmp_path)
 
     # Mock client que no devuelve recursos para forzar fallback local
     mock_client = create_autospec(ExternalCatalogClientPort)

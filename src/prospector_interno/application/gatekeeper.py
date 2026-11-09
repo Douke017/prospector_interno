@@ -5,6 +5,8 @@ y Locks en Vuelo) para evitar tráfico redundante y colisiones concurrentes.
 """
 
 from contextlib import contextmanager
+import re
+from typing import Any
 
 from prospector_interno.domain.contracts.derivation_spec import (
     DerivationEvaluationRequest,
@@ -38,11 +40,13 @@ class PreFlightGatekeeper:
         state_registry: GatekeeperStatePort,
         derivation_filter: AssetDerivationFilter | None = None,
         download_state_filter: DownloadStateFilter | None = None,
+        gold_partition_checker: Any = None,
     ) -> None:
         self._storage = storage
         self._state_registry = state_registry
         self._derivation_filter = derivation_filter
         self._download_state_filter = download_state_filter
+        self._gold_checker = gold_partition_checker
 
     def evaluate(self, request: IngestionRequest) -> PreFlightEvaluation:
         """Evalúa una solicitud antes de permitir cualquier llamada a la red.
@@ -78,9 +82,37 @@ class PreFlightGatekeeper:
                 # El formato de periodo no es macro-temporal estructurado; seguir
                 pass
 
-        # 2. Filtro 1: Verificación de Cache Hit Bronze (HUI-01)
+        # 1.5. Verificación en Repositorio Consolidado Gold (Objetivo 1 y 5)
+        if (
+            not request.force_refresh
+            and self._gold_checker is not None
+            and request.dataset_code.lower().startswith("mart_")
+            and request.period
+            and re.fullmatch(r"\d{4}-\d{2}", request.period.strip())
+        ):
+            g_yr, g_mo = request.period.strip().split("-")
+            if self._gold_checker.has_partition(
+                request.dataset_code.lower(), int(g_yr), int(g_mo)
+            ):
+                return PreFlightEvaluation(
+                    verdict=PreFlightVerdict.CACHE_HIT_GOLD,
+                    idempotency_key=key,
+                    reason=(
+                        f"Periodo {request.period} ya consolidado y disponible en "
+                        f"{request.dataset_code.lower()}."
+                    ),
+                    lock_acquired=False,
+                )
+
+        # 2. Filtro 1: Verificación de Cache Hit Bronze por SHA-256, URL o Periodo (HUI-01)
         if not request.force_refresh:
-            cached = self._storage.find_by_url(request.target_url)
+            cached = (
+                self._storage.find_by_checksum(request.checksum_sha256)
+                if request.checksum_sha256
+                else None
+            )
+            if cached is None:
+                cached = self._storage.find_by_url(request.target_url)
             if cached is None and request.period and request.period != "LATEST":
                 cached = self._storage.find_by_period(
                     domain=request.domain,

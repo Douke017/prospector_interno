@@ -1,4 +1,6 @@
-"""Adaptador DuckDB para consultas vectorizadas sobre la Capa Gold (HUI-14)."""
+"""Adaptador analítico vectorizado sobre los 4 Repositorios Consolidados Gold."""
+
+from __future__ import annotations
 
 import math
 from pathlib import Path
@@ -13,28 +15,167 @@ from prospector_interno.domain.contracts.analytics_spec import (
 from prospector_interno.domain.ports import GoldPartitionPort
 
 
+DATAMART_CATALOG: dict[str, dict[str, Any]] = {
+    "mart_cartera": {
+        "datamart": "mart_cartera",
+        "title": "Repositorio de Cartera y Mora (FINRURAL / IFDs)",
+        "source_code": "FINRURAL",
+        "description": (
+            "Estados de situación patrimonial, colocaciones de cartera bruta, "
+            "mora, previsiones y ratios de cobertura de entidades financieras de desarrollo."
+        ),
+        "default_columns": [
+            "gestion",
+            "mes",
+            "institucion_id",
+            "cartera_bruta",
+            "cartera_vigente",
+            "cartera_en_mora",
+            "ratio_mora",
+            "total_activo",
+        ],
+        "allowed_columns": [
+            "gestion",
+            "mes",
+            "institucion_id",
+            "institucion_nombre",
+            "cartera_bruta",
+            "cartera_vigente",
+            "cartera_vencida",
+            "cartera_en_ejecucion",
+            "cartera_en_mora",
+            "prevision_cartera",
+            "total_activo",
+            "total_pasivo",
+            "total_patrimonio",
+            "ratio_mora",
+            "ratio_cobertura",
+            "source_file_sha256",
+        ],
+    },
+    "mart_tasas_bcb": {
+        "datamart": "mart_tasas_bcb",
+        "title": "Repositorio Monetario, Liquidez e Inflación (BCB)",
+        "source_code": "BCB",
+        "description": (
+            "Series mensuales consolidadas del Banco Central de Bolivia: base y emisión "
+            "monetaria, reservas internacionales, depósitos, bolivianización, IPC y UFV."
+        ),
+        "default_columns": [
+            "gestion",
+            "mes",
+            "institucion_id",
+            "base_monetaria_bs",
+            "emision_monetaria_bs",
+            "reservas_internacionales_usd",
+            "inflacion_mensual_pct",
+            "bolivianizacion_depositos_pct",
+            "ufv_cierre",
+        ],
+        "allowed_columns": [
+            "gestion",
+            "mes",
+            "institucion_id",
+            "institucion_nombre",
+            "base_monetaria_bs",
+            "emision_monetaria_bs",
+            "reservas_bancarias_bs",
+            "depositos_sistema_bs",
+            "cartera_sistema_bs",
+            "reservas_internacionales_usd",
+            "inflacion_mensual_pct",
+            "bolivianizacion_depositos_pct",
+            "ufv_cierre",
+            "source_file_sha256",
+        ],
+    },
+    "mart_estadisticas_bbv": {
+        "datamart": "mart_estadisticas_bbv",
+        "title": "Repositorio Bursátil y Patrimonial (BBV)",
+        "source_code": "BBV",
+        "description": (
+            "Balances generales consolidados de la Bolsa Boliviana de Valores S.A.: "
+            "disponibilidades, inversiones bursátiles, liquidez corriente y solvencia."
+        ),
+        "default_columns": [
+            "gestion",
+            "mes",
+            "institucion_id",
+            "disponible_bs",
+            "inversiones_bursatiles_bs",
+            "total_activo",
+            "total_pasivo",
+            "total_patrimonio",
+            "ratio_liquidez",
+            "ratio_endeudamiento",
+        ],
+        "allowed_columns": [
+            "gestion",
+            "mes",
+            "institucion_id",
+            "institucion_nombre",
+            "disponible_bs",
+            "inversiones_bursatiles_bs",
+            "activo_corriente_bs",
+            "inversiones_permanentes_bs",
+            "total_activo",
+            "pasivo_corriente_bs",
+            "total_pasivo",
+            "total_patrimonio",
+            "ratio_liquidez",
+            "ratio_endeudamiento",
+            "source_file_sha256",
+        ],
+    },
+    "mart_indicadores_asfi": {
+        "datamart": "mart_indicadores_asfi",
+        "title": "Repositorio de Indicadores Prudenciales (ASFI)",
+        "source_code": "ASFI",
+        "description": (
+            "Indicadores prudenciales consolidados bajo normativa de supervisión financiera: "
+            "coeficiente de solvencia, apalancamiento, peso de cartera y cobertura."
+        ),
+        "default_columns": [
+            "gestion",
+            "mes",
+            "institucion_id",
+            "institucion_nombre",
+            "total_activo",
+            "total_patrimonio",
+            "coeficiente_solvencia",
+            "peso_cartera_activo",
+            "ratio_mora",
+            "apalancamiento_veces",
+        ],
+        "allowed_columns": [
+            "gestion",
+            "mes",
+            "institucion_id",
+            "institucion_nombre",
+            "total_activo",
+            "total_pasivo",
+            "total_patrimonio",
+            "cartera_bruta",
+            "prevision_cartera",
+            "coeficiente_solvencia",
+            "peso_cartera_activo",
+            "ratio_mora",
+            "ratio_cobertura",
+            "apalancamiento_veces",
+            "source_file_sha256",
+        ],
+    },
+}
+
 ALLOWED_COLUMNS: set[str] = {
-    "gestion",
-    "mes",
-    "institucion_id",
-    "institucion_nombre",
-    "cartera_bruta",
-    "cartera_vigente",
-    "cartera_vencida",
-    "cartera_en_ejecucion",
-    "cartera_en_mora",
-    "prevision_cartera",
-    "total_activo",
-    "total_pasivo",
-    "total_patrimonio",
-    "ratio_mora",
-    "ratio_cobertura",
-    "source_file_sha256",
+    col
+    for cfg in DATAMART_CATALOG.values()
+    for col in cfg["allowed_columns"]
 }
 
 
 class DuckDBAnalyticsAdapter:
-    """Motor de consulta SQL vectorizado sobre Datamarts en Capa Gold."""
+    """Motor de consulta analítica vectorizada sobre los 4 repositorios Gold."""
 
     def __init__(
         self,
@@ -45,13 +186,11 @@ class DuckDBAnalyticsAdapter:
         self._max_memory = max_memory
 
     def _connect(self) -> duckdb.DuckDBPyConnection:
-        """Crea una conexión in-memory aplicando el presupuesto de RAM (HUI-23)."""
         con = duckdb.connect(":memory:")
         con.execute(f"SET max_memory = '{self._max_memory}'")
         return con
 
     def get_max_memory_setting(self) -> str:
-        """Consulta el valor configurado de max_memory en DuckDB."""
         con = self._connect()
         try:
             return con.execute(
@@ -61,7 +200,6 @@ class DuckDBAnalyticsAdapter:
             con.close()
 
     def _resolve_parquet_glob(self, datamart: str) -> str | None:
-        """Resuelve el patrón glob de archivos Parquet para el datamart."""
         mart_dir = self._gold_path / datamart
         if not mart_dir.exists():
             return None
@@ -76,11 +214,9 @@ class DuckDBAnalyticsAdapter:
         gestion: int | None = None,
         mes: int | None = None,
     ) -> bool:
-        """Verifica si existen particiones de datos en Capa Gold."""
         glob_path = self._resolve_parquet_glob(datamart)
         if not glob_path:
             return False
-
         if gestion is None and mes is None:
             return True
 
@@ -105,30 +241,30 @@ class DuckDBAnalyticsAdapter:
         self,
         datamart: str = "mart_cartera",
     ) -> dict[str, list[Any]]:
-        """Retorna las dimensiones disponibles (instituciones, gestiones, meses)."""
         glob_path = self._resolve_parquet_glob(datamart)
         if not glob_path:
             return {"instituciones": [], "gestiones": [], "meses": []}
 
         con = self._connect()
         try:
-            sql_inst = (
-                f"SELECT DISTINCT institucion_id "
-                f"FROM read_parquet('{glob_path}') ORDER BY 1"
-            )
-            insts = [r[0] for r in con.execute(sql_inst).fetchall()]
-
-            sql_gest = (
-                f"SELECT DISTINCT gestion "
-                f"FROM read_parquet('{glob_path}') ORDER BY 1"
-            )
-            gestiones = [r[0] for r in con.execute(sql_gest).fetchall()]
-
-            sql_mes = (
-                f"SELECT DISTINCT mes "
-                f"FROM read_parquet('{glob_path}') ORDER BY 1"
-            )
-            meses = [r[0] for r in con.execute(sql_mes).fetchall()]
+            insts = [
+                r[0]
+                for r in con.execute(
+                    f"SELECT DISTINCT institucion_id FROM read_parquet('{glob_path}') ORDER BY 1"
+                ).fetchall()
+            ]
+            gestiones = [
+                r[0]
+                for r in con.execute(
+                    f"SELECT DISTINCT gestion FROM read_parquet('{glob_path}') ORDER BY 1"
+                ).fetchall()
+            ]
+            meses = [
+                r[0]
+                for r in con.execute(
+                    f"SELECT DISTINCT mes FROM read_parquet('{glob_path}') ORDER BY 1"
+                ).fetchall()
+            ]
             return {
                 "instituciones": insts,
                 "gestiones": gestiones,
@@ -139,13 +275,73 @@ class DuckDBAnalyticsAdapter:
         finally:
             con.close()
 
+    def get_datamarts_summary(self) -> list[dict[str, Any]]:
+        """Retorna estado físico en vivo de los 4 repositorios consolidados Gold."""
+        summaries: list[dict[str, Any]] = []
+        con = self._connect()
+        try:
+            for dm_key, cfg in DATAMART_CATALOG.items():
+                mart_dir = self._gold_path / dm_key
+                pq_files = list(mart_dir.glob("**/*.parquet")) if mart_dir.exists() else []
+                size_bytes = sum(f.stat().st_size for f in pq_files) if pq_files else 0
+                row_count = 0
+                partitions_count = 0
+                inst_count = 0
+                min_period = None
+                max_period = None
+
+                if pq_files:
+                    glob_path = (mart_dir / "**/*.parquet").resolve().as_posix()
+                    try:
+                        agg = con.execute(
+                            f"""
+                            SELECT
+                                COUNT(*) AS rows_cnt,
+                                COUNT(DISTINCT (CAST(gestion AS VARCHAR) || '-' || LPAD(CAST(mes AS VARCHAR), 2, '0'))) AS part_cnt,
+                                COUNT(DISTINCT institucion_id) AS inst_cnt,
+                                MIN(CAST(gestion AS VARCHAR) || '-' || LPAD(CAST(mes AS VARCHAR), 2, '0')) AS min_p,
+                                MAX(CAST(gestion AS VARCHAR) || '-' || LPAD(CAST(mes AS VARCHAR), 2, '0')) AS max_p
+                            FROM read_parquet('{glob_path}')
+                            """
+                        ).fetchone()
+                        if agg:
+                            row_count = int(agg[0] or 0)
+                            partitions_count = int(agg[1] or 0)
+                            inst_count = int(agg[2] or 0)
+                            min_period = agg[3]
+                            max_period = agg[4]
+                    except Exception:
+                        pass
+
+                summaries.append(
+                    {
+                        "datamart": dm_key,
+                        "title": cfg["title"],
+                        "source_code": cfg["source_code"],
+                        "description": cfg["description"],
+                        "is_materialized": row_count > 0,
+                        "total_rows": row_count,
+                        "partitions_count": partitions_count,
+                        "institutions_count": inst_count,
+                        "size_bytes": size_bytes,
+                        "size_kb": round(size_bytes / 1024, 2),
+                        "earliest_period": min_period,
+                        "latest_period": max_period,
+                        "available_columns": cfg["allowed_columns"],
+                        "default_columns": cfg["default_columns"],
+                    }
+                )
+        finally:
+            con.close()
+        return summaries
+
     def execute_query(
         self,
         request: AnalyticsQueryRequest,
     ) -> AnalyticsQueryResponse:
-        """Ejecuta una consulta analítica parametrizada sobre la Capa Gold."""
         t_start = time.perf_counter()
-        glob_path = self._resolve_parquet_glob(request.datamart)
+        dm_key = request.datamart.strip().lower()
+        glob_path = self._resolve_parquet_glob(dm_key)
 
         if not glob_path:
             return AnalyticsQueryResponse(
@@ -156,29 +352,22 @@ class DuckDBAnalyticsAdapter:
                 records=[],
             )
 
-        # Selección segura de métricas
+        dm_cfg = DATAMART_CATALOG.get(dm_key, DATAMART_CATALOG["mart_cartera"])
+        dm_allowed = set(dm_cfg["allowed_columns"])
+        default_cols = list(dm_cfg["default_columns"])
+
         if request.metrics:
             selected_cols = [
-                c for c in request.metrics if c.lower() in ALLOWED_COLUMNS
+                c for c in request.metrics if c.lower() in dm_allowed
             ]
         else:
-            selected_cols = [
-                "gestion",
-                "mes",
-                "institucion_id",
-                "cartera_bruta",
-                "cartera_vigente",
-                "cartera_en_mora",
-                "ratio_mora",
-                "total_activo",
-            ]
+            selected_cols = default_cols
 
         if not selected_cols:
-            selected_cols = ["gestion", "mes", "institucion_id", "cartera_bruta"]
+            selected_cols = default_cols
 
         cols_sql = ", ".join(selected_cols)
 
-        # Construcción dinámica de filtros WHERE
         where_clauses = ["1=1"]
         params: list[Any] = []
 
@@ -240,7 +429,7 @@ class DuckDBAnalyticsAdapter:
 
 
 class DuckDBGoldPartitionAdapter(GoldPartitionPort):
-    """Adaptador de inspección de particiones Parquet en Capa Gold (HUI-02)."""
+    """Adaptador de inspección de particiones Parquet en Capa Gold."""
 
     def __init__(self, base_gold_path: Path | None = None) -> None:
         self._analytics = DuckDBAnalyticsAdapter(base_gold_path)
@@ -250,7 +439,6 @@ class DuckDBGoldPartitionAdapter(GoldPartitionPort):
         self,
         datamart: str = "mart_cartera",
     ) -> list[tuple[int, int]]:
-        """Retorna tuplas (gestion, mes) existentes en el datamart Parquet."""
         mart_dir = self._gold_path / datamart
         if not mart_dir.exists():
             return []
@@ -272,7 +460,6 @@ class DuckDBGoldPartitionAdapter(GoldPartitionPort):
         gestion: int,
         mes: int,
     ) -> bool:
-        """Verifica si una partición específica (gestion, mes) existe en Gold."""
         part_dir = (
             self._gold_path / datamart / f"gestion={gestion}" / f"mes={mes}"
         )
