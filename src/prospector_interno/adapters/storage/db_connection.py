@@ -126,6 +126,32 @@ def get_database_config(
     )
 
 
+_HOST_REACHABLE_CACHE: dict[tuple[str, int], tuple[float, bool]] = {}
+
+
+def _is_tcp_reachable(host: str, port: int, timeout: float = 0.6) -> bool:
+    import socket
+    import time
+
+    if host in ("127.0.0.1", "localhost"):
+        return True
+    now = time.monotonic()
+    cached = _HOST_REACHABLE_CACHE.get((host, port))
+    if cached and (now - cached[0]) < 30.0:
+        return cached[1]
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(timeout)
+    try:
+        sock.connect((host, port))
+        ok = True
+    except OSError:
+        ok = False
+    finally:
+        sock.close()
+    _HOST_REACHABLE_CACHE[(host, port)] = (now, ok)
+    return ok
+
+
 def get_replica_config(read_only: bool = False) -> DatabaseConfig:
     """Retorna la configuración hacia PostgreSQL de DATAX (producción o réplica)."""
     is_pytest = "PYTEST_CURRENT_TEST" in os.environ and "FORCE_PROD_DB" not in os.environ
@@ -147,6 +173,18 @@ def get_replica_config(read_only: bool = False) -> DatabaseConfig:
     user = os.environ.get("PROSPECTOR_PG_USER", env_cfg.user)
     password = os.environ.get("PROSPECTOR_PG_PASSWORD", env_cfg.password)
     timeout = int(os.environ.get("PROSPECTOR_PG_TIMEOUT", "5"))
+
+    if not _is_tcp_reachable(host, port):
+        return DatabaseConfig(
+            host="127.0.0.1",
+            port=5434,
+            database="platform_db",
+            user="postgres",
+            password="postgres",
+            connect_timeout=2,
+            read_only=read_only,
+        )
+
     return DatabaseConfig(
         host=host,
         port=port,
