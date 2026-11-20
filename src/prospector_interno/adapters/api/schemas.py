@@ -1,6 +1,9 @@
+from typing import Any, Literal
+
 from pydantic import BaseModel, ConfigDict, Field
 
 from prospector_interno.domain.models import (
+    GatekeeperMode,
     PreFlightVerdict,
     ReconciliationDiffReportItem,
 )
@@ -93,8 +96,28 @@ class IngestionEvaluateRequest(BaseModel):
         default=None,
         description="Huella SHA-256 opcional para validación directa antiduplicidad",
     )
+    etag: str | None = Field(
+        default=None,
+        description="Cabecera ETag opcional para validación pre-descarga",
+    )
     force_refresh: bool = Field(default=False)
+    mode: GatekeeperMode = Field(
+        default="DRY_RUN",
+        description="DRY_RUN (defecto seguro sin lock) o ACQUIRE_LOCK (reserva TTL)",
+    )
+    dry_run: bool | None = Field(
+        default=None,
+        description="Alias booleano opcional: true=DRY_RUN, false=ACQUIRE_LOCK",
+    )
+    lock_ttl_seconds: int = Field(default=300, ge=1, le=3600)
     request_id: str | None = Field(default=None)
+
+    def resolved_mode(self) -> GatekeeperMode:
+        if self.dry_run is True:
+            return "DRY_RUN"
+        if self.dry_run is False:
+            return "ACQUIRE_LOCK"
+        return self.mode
 
 
 class IngestionEvaluateResponse(BaseModel):
@@ -106,6 +129,7 @@ class IngestionEvaluateResponse(BaseModel):
     idempotency_key: str
     reason: str
     lock_acquired: bool
+    mode: GatekeeperMode = "DRY_RUN"
     cached_artifact_id: str | None = None
     in_flight_task_id: str | None = None
     task_id: str | None = None
@@ -113,6 +137,32 @@ class IngestionEvaluateResponse(BaseModel):
     subscribers_count: int = 0
     derivation_query: str | None = None
     missing_periods: list[str] = Field(default_factory=list)
+    action_links: dict[str, str | None] = Field(default_factory=dict)
+    latency_ms: float = 0.0
+    dedup_criterion: str | None = None
+
+
+class BatchGatekeeperEvaluateRequest(BaseModel):
+    """Evaluación masiva de hasta 500 solicitudes en el Pre-flight Gatekeeper."""
+
+    model_config = ConfigDict(frozen=True)
+
+    items: list[IngestionEvaluateRequest] = Field(..., min_length=1, max_length=500)
+    mode: GatekeeperMode = Field(default="DRY_RUN")
+    lock_ttl_seconds: int = Field(default=300, ge=1, le=3600)
+
+
+class BatchGatekeeperEvaluateResponse(BaseModel):
+    """Resultado consolidado de la evaluación por lotes."""
+
+    model_config = ConfigDict(frozen=True)
+
+    total: int
+    mode: GatekeeperMode
+    elapsed_ms: float
+    summary: dict[str, int]
+    saved_downloads: int
+    results: list[IngestionEvaluateResponse]
 
 
 class DownloadStatusItemResponse(BaseModel):
@@ -126,8 +176,19 @@ class DownloadStatusItemResponse(BaseModel):
     status: str
     bytes_downloaded: int = 0
     total_bytes: int = 0
+    progress_pct: float = 0.0
+    speed_bps: float = 0.0
+    retry_count: int = 0
+    max_retries: int = 3
+    last_error_code: str | None = None
+    sha256_checksum: str | None = None
+    local_path: str | None = None
     task_id: str | None = None
+    worker_id: str | None = None
+    resource_key: str | None = None
+    priority: int = 5
     subscribers_count: int = 0
+    coalesced: bool = False
     started_at: str | None = None
     completed_at: str | None = None
 

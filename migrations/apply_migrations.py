@@ -22,6 +22,7 @@ from psycopg.rows import dict_row
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 WORKSPACE_ROOT = PROJECT_ROOT.parent
 SQL_MIGRATION_FILE = Path(__file__).resolve().parent / "001_evolve_prospector_schema.sql"
+SQL_MIGRATION_002_FILE = Path(__file__).resolve().parent / "002_raw_data_prospector_evolution.sql"
 
 
 SEMANTIC_DICTIONARY_SEEDS: list[tuple[Any, ...]] = [
@@ -428,10 +429,17 @@ def run_migrations() -> dict[str, int]:
     """Ejecuta el SQL DDL y puebla idempotentemente las tablas maestras."""
     bronze_artifacts = consolidate_bronze_directories()
     sql_script = SQL_MIGRATION_FILE.read_text(encoding="utf-8")
+    sql_script_002 = (
+        SQL_MIGRATION_002_FILE.read_text(encoding="utf-8")
+        if SQL_MIGRATION_002_FILE.is_file()
+        else ""
+    )
 
     with psycopg.connect(get_migration_pg_dsn(), row_factory=dict_row) as conn:
         with conn.cursor() as cur:
             cur.execute(sql_script)
+            if sql_script_002:
+                cur.execute(sql_script_002)
 
             # 1. Sincronizar canonical_sources y canonical_datasets desde source / file
             cur.execute(

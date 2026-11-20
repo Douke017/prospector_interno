@@ -16,6 +16,43 @@ def parse_period_granularity(raw_period: str) -> PeriodBreakdown:
     """Analiza una cadena de periodo y determina su granularidad y meses componentes."""
     clean = raw_period.strip().upper()
 
+    # 0. Rango temporal arbitrario: 'YYYY-MM..YYYY-MM', 'YYYY-MM:YYYY-MM', 'YYYY-MM-DD..YYYY-MM-DD' o 'YYYY..YYYY'
+    range_match = re.match(
+        r"^(\d{4})(?:[-_](\d{1,2})(?:[-_]\d{1,2})?)?\s*(?:\.\.|:|A|TO)\s*(\d{4})(?:[-_](\d{1,2})(?:[-_]\d{1,2})?)?$",
+        clean,
+    )
+    if range_match:
+        y1 = int(range_match.group(1))
+        m1 = int(range_match.group(2)) if range_match.group(2) else 1
+        y2 = int(range_match.group(3))
+        m2 = int(range_match.group(4)) if range_match.group(4) else 12
+        _validate_year(y1)
+        _validate_year(y2)
+        if not (1 <= m1 <= 12) or not (1 <= m2 <= 12):
+            raise ValueError(f"Mes fuera de rango permitido (1-12) en '{raw_period}'.")
+        if (y1, m1) > (y2, m2):
+            raise ValueError(f"El inicio del rango '{raw_period}' supera la fecha final.")
+        keys: list[str] = []
+        months_ordered: list[int] = []
+        cy, cm = y1, m1
+        while (cy, cm) <= (y2, m2):
+            keys.append(f"{cy:04d}-{cm:02d}")
+            if cm not in months_ordered:
+                months_ordered.append(cm)
+            cm += 1
+            if cm > 12:
+                cm = 1
+                cy += 1
+            if len(keys) > 240:
+                raise ValueError("El rango temporal excede el máximo de 240 cortes mensuales.")
+        return PeriodBreakdown(
+            raw_period=raw_period,
+            granularity=DerivationGranularity.CUSTOM_RANGE,
+            gestion=y1,
+            required_months=sorted(months_ordered),
+            required_period_keys=keys,
+        )
+
     # 1. Anual / Gestión completa (ej: '2024', '2024-ANNUAL', 'GESTION-2024')
     annual_pattern = r"^(?:GESTION[-_])?(\d{4})(?:[-_]?(?:ANNUAL|ANUAL))?$"
     annual_match = re.match(annual_pattern, clean)
@@ -85,6 +122,22 @@ def parse_period_granularity(raw_period: str) -> PeriodBreakdown:
     )
 
 
+def _build_period_where_clause(breakdown: PeriodBreakdown) -> str:
+    by_year: dict[int, list[int]] = {}
+    for key in breakdown.required_period_keys:
+        yr_str, mo_str = key.split("-")
+        by_year.setdefault(int(yr_str), []).append(int(mo_str))
+    if len(by_year) == 1:
+        yr, months = next(iter(by_year.items()))
+        months_str = ", ".join(str(m) for m in sorted(months))
+        return f"gestion = {yr} AND mes IN ({months_str})"
+    parts = [
+        f"(gestion = {yr} AND mes IN ({', '.join(str(m) for m in sorted(months))}))"
+        for yr, months in sorted(by_year.items())
+    ]
+    return "(" + " OR ".join(parts) + ")"
+
+
 def compile_derivation_sql(
     datamart: str,
     breakdown: PeriodBreakdown,
@@ -92,7 +145,7 @@ def compile_derivation_sql(
     institution_id: str | None = None,
 ) -> str:
     """Genera la consulta DuckDB vectorizada para agregar los meses sobre Gold."""
-    months_str = ", ".join(str(m) for m in breakdown.required_months)
+    period_where = _build_period_where_clause(breakdown)
     inst_clause = (
         f" AND UPPER(institucion_id) = '{institution_id.strip().upper()}'"
         if institution_id
@@ -117,7 +170,7 @@ def compile_derivation_sql(
             "COUNT(DISTINCT source_file_sha256) AS archivos_fuente_unicos, "
             "COUNT(DISTINCT mes) AS meses_agregados "
             f"FROM read_parquet('{parquet_glob}') "
-            f"WHERE gestion = {breakdown.gestion} AND mes IN ({months_str})"
+            f"WHERE {period_where}"
             f"{inst_clause} "
             "GROUP BY institucion_id, institucion_nombre "
             "ORDER BY registros_consolidados DESC;"
@@ -138,7 +191,7 @@ def compile_derivation_sql(
             "MAX(ufv_cierre) AS ufv_cierre_periodo, "
             "COUNT(DISTINCT mes) AS meses_agregados "
             f"FROM read_parquet('{parquet_glob}') "
-            f"WHERE gestion = {breakdown.gestion} AND mes IN ({months_str})"
+            f"WHERE {period_where}"
             f"{inst_clause} "
             "GROUP BY institucion_id, institucion_nombre;"
         )
@@ -159,7 +212,7 @@ def compile_derivation_sql(
             "ROUND(AVG(ratio_endeudamiento), 4) AS ratio_endeudamiento_promedio, "
             "COUNT(DISTINCT mes) AS meses_agregados "
             f"FROM read_parquet('{parquet_glob}') "
-            f"WHERE gestion = {breakdown.gestion} AND mes IN ({months_str})"
+            f"WHERE {period_where}"
             f"{inst_clause} "
             "GROUP BY institucion_id, institucion_nombre;"
         )
@@ -179,7 +232,7 @@ def compile_derivation_sql(
             "ROUND(AVG(apalancamiento_veces), 4) AS apalancamiento_promedio, "
             "COUNT(DISTINCT mes) AS meses_agregados "
             f"FROM read_parquet('{parquet_glob}') "
-            f"WHERE gestion = {breakdown.gestion} AND mes IN ({months_str})"
+            f"WHERE {period_where}"
             f"{inst_clause} "
             "GROUP BY institucion_id, institucion_nombre "
             "ORDER BY coeficiente_solvencia_promedio DESC;"
@@ -205,7 +258,7 @@ def compile_derivation_sql(
         "AS ratio_cobertura_acumulado, "
         "COUNT(DISTINCT mes) AS meses_agregados "
         f"FROM read_parquet('{parquet_glob}') "
-        f"WHERE gestion = {breakdown.gestion} AND mes IN ({months_str})"
+        f"WHERE {period_where}"
         f"{inst_clause} "
         "GROUP BY institucion_id, institucion_nombre "
         "ORDER BY cartera_bruta_acumulada DESC;"

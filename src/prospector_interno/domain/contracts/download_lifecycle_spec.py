@@ -12,12 +12,16 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class DownloadLifecycleStatus(str, Enum):
-    """Estados canónicos de descarga física según Sección 14.1 de la arquitectura."""
+    """Estados canónicos de descarga física en cola y workers multi-proceso."""
 
+    QUEUED = "QUEUED"
     PENDING = "PENDING"
     DOWNLOADING = "DOWNLOADING"
+    VERIFYING_SHA256 = "VERIFYING_SHA256"
     COMPLETED = "COMPLETED"
+    DEDUPLICATED = "DEDUPLICATED"
     FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
     THROTTLED = "THROTTLED"
 
 
@@ -79,6 +83,48 @@ class DownloadRecord(BaseModel):
         default=None,
         description="Marca temporal de finalización de transferencia",
     )
+    priority: int = Field(default=5, ge=1, le=10)
+    speed_bps: float = Field(default=0.0, ge=0.0)
+    retry_count: int = Field(default=0, ge=0)
+    max_retries: int = Field(default=3, ge=0)
+    next_retry_at: datetime | None = Field(default=None)
+    worker_id: str | None = Field(default=None)
+    resource_key: str | None = Field(default=None)
+    dataset_code: str | None = Field(default=None)
+    period_label: str | None = Field(default=None)
+    etag: str | None = Field(default=None)
+
+
+class DeduplicationAuditRecord(BaseModel):
+    """Registro auditable de una descarga o procesamiento redundante evitado (Objetivo 5)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    audit_id: str
+    request_id: str | None = None
+    source_id: str
+    canonical_url: str
+    criterion: str
+    reused_asset_id: str | None = None
+    reused_sha256: str | None = None
+    bytes_saved: int = 0
+    detail: str | None = None
+    detected_at: datetime
+
+
+class AssetAliasRecord(BaseModel):
+    """Alias de trazabilidad para múltiples URLs que resuelven al mismo binario SHA-256."""
+
+    model_config = ConfigDict(frozen=True)
+
+    alias_id: str
+    canonical_url: str
+    normalized_url_sha256: str
+    source_id: str
+    target_asset_id: str
+    target_sha256: str
+    etag: str | None = None
+    created_at: datetime
 
 
 class DownloadStateEvaluationRequest(BaseModel):

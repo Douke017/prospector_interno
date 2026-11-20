@@ -72,7 +72,7 @@ def test_catalog_datasets_search() -> None:
 
 
 def test_gatekeeper_evaluate_endpoint() -> None:
-    """Verifica evaluación de pre-vuelo vía API REST."""
+    """Verifica evaluación de pre-vuelo vía API REST (DRY_RUN seguro y ACQUIRE_LOCK)."""
     payload = {
         "dataset_code": "DS_BO_INE_SEGUROS",
         "domain": "ine.gob.bo",
@@ -80,11 +80,22 @@ def test_gatekeeper_evaluate_endpoint() -> None:
         "period": "2026-05",
         "force_refresh": False,
     }
-    response = client.post("/api/v1/gatekeeper/evaluate", json=payload)
-    assert response.status_code == 200
-    data = response.json()
-    assert data["verdict"] == "PROCEED_DOWNLOAD"
-    assert data["lock_acquired"] is True
+    # Por defecto (DRY_RUN) no adquiere lock fantasma
+    dry_resp = client.post("/api/v1/gatekeeper/evaluate", json=payload)
+    assert dry_resp.status_code == 200
+    dry_data = dry_resp.json()
+    assert dry_data["verdict"] == "PROCEED_DOWNLOAD"
+    assert dry_data["lock_acquired"] is False
+
+    # Con mode=ACQUIRE_LOCK sí reserva el lock con TTL
+    lock_resp = client.post(
+        "/api/v1/gatekeeper/evaluate",
+        json={**payload, "mode": "ACQUIRE_LOCK"},
+    )
+    assert lock_resp.status_code == 200
+    lock_data = lock_resp.json()
+    assert lock_data["verdict"] == "PROCEED_DOWNLOAD"
+    assert lock_data["lock_acquired"] is True
 
 
 def test_reconciliation_duckdb_diff(tmp_path: Path) -> None:

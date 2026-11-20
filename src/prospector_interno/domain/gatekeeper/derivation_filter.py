@@ -27,15 +27,31 @@ class AssetDerivationFilter:
         self,
         partition_checker: GoldPartitionPort,
         base_gold_path: Path | None = None,
+        bronze_storage: object | None = None,
     ) -> None:
         self._checker = partition_checker
         self._gold_path = base_gold_path or Path("data/gold")
+        self._bronze_storage = bronze_storage
+
+    def _has_master_archive_coverage(self, dataset_code: str, year: int) -> bool:
+        """Verifica si existe un archivo maestro anual/acumulado en custodia Bronze."""
+        if self._bronze_storage is None or not hasattr(self._bronze_storage, "find_by_period"):
+            return False
+        for candidate_period in (str(year), f"{year}-ANNUAL", f"{year}-MASTER"):
+            art = self._bronze_storage.find_by_period(
+                domain="",
+                dataset_code=dataset_code,
+                period=candidate_period,
+            )
+            if art is not None:
+                return True
+        return False
 
     def evaluate(
         self,
         request: DerivationEvaluationRequest,
     ) -> DerivationEvaluationResult:
-        """Determina si la solicitud es derivable y genera el query precompilado."""
+        """Determina si la solicitud es derivable (Gold + maestros Bronze) y genera SQL."""
         try:
             breakdown = parse_period_granularity(request.period)
         except ValueError as err:
@@ -54,20 +70,30 @@ class AssetDerivationFilter:
 
         available_periods: list[str] = []
         missing_periods: list[str] = []
+        master_years_cache: dict[int, bool] = {}
 
-        for m in breakdown.required_months:
-            key = f"{breakdown.gestion}-{m:02d}"
-            if self._checker.has_partition(
+        for key in breakdown.required_period_keys:
+            yr_s, mo_s = key.split("-")
+            yr_i, mo_i = int(yr_s), int(mo_s)
+            has_gold = self._checker.has_partition(
                 datamart=request.dataset_code,
-                gestion=breakdown.gestion,
-                mes=m,
-            ):
+                gestion=yr_i,
+                mes=mo_i,
+            )
+            if not has_gold:
+                if yr_i not in master_years_cache:
+                    master_years_cache[yr_i] = self._has_master_archive_coverage(
+                        request.dataset_code, yr_i
+                    )
+                has_gold = master_years_cache[yr_i]
+
+            if has_gold:
                 available_periods.append(key)
             else:
                 missing_periods.append(key)
 
-        total_required = len(breakdown.required_months)
-        coverage_ratio = round(len(available_periods) / total_required, 4)
+        total_required = len(breakdown.required_period_keys)
+        coverage_ratio = round(len(available_periods) / max(1, total_required), 4)
 
         if coverage_ratio == 1.0:
             status = DerivationStatus.DERIVABLE

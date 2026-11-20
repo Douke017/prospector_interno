@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
+import base64
 import csv
+from datetime import datetime, timedelta, timezone
 import io
-from typing import Any
+import json
+from pathlib import Path
+import tempfile
+from typing import Any, Literal
 
+import duckdb
 from fastapi import APIRouter, Header, HTTPException, Query, Request
 from fastapi.responses import Response, StreamingResponse
 import openpyxl
@@ -16,6 +22,10 @@ from pydantic import BaseModel, Field
 
 from prospector_interno.adapters.analytics.duckdb_analytics_adapter import (
     DATAMART_CATALOG,
+)
+from prospector_interno.adapters.analytics.readonly_sql_engine import (
+    ReadOnlyDuckDbSqlEngine,
+    UnsafeSqlError,
 )
 from prospector_interno.adapters.api import dependencies as deps
 from prospector_interno.adapters.api.routers.catalog_router import (
@@ -43,21 +53,50 @@ _analytics_adapter = deps.analytics_adapter
 _bronze_storage = deps.bronze_storage
 _gold_materializer = deps.gold_materializer
 _views_service = deps.views_service
+_readonly_sql_engine = deps.readonly_sql_engine
+
+
+def set_readonly_sql_engine(engine: ReadOnlyDuckDbSqlEngine) -> None:
+    """Permite inyectar un motor SQL read-only aislado en pruebas."""
+    global _readonly_sql_engine
+    _readonly_sql_engine = engine
 
 
 class CreateApiKeyRequest(BaseModel):
-    """Solicitud para emitir una llave de conexión directa Excel / Power BI."""
+    """Solicitud para emitir una llave API con alcance por capa/dataset y expiración."""
 
     label: str = Field(
         ...,
         min_length=2,
         max_length=120,
-        examples=["Libro Excel Riesgo Crediticio"],
+        examples=["Notebook Ciencia de Datos Polars"],
     )
     allowed_datamarts: str = Field(
         default="*",
         description="'*' para todos los repositorios o lista separada por comas.",
     )
+    allowed_layers: list[str] = Field(
+        default_factory=lambda: ["RAW", "GOLD", "SQL"],
+        description="Capas autorizadas: RAW, GOLD, SQL (o '*')",
+    )
+    expires_at: datetime | None = Field(
+        default=None,
+        description="Fecha/hora UTC exacta de expiración opcional.",
+    )
+    expires_in_days: int | None = Field(
+        default=None,
+        ge=1,
+        le=3650,
+        description="Alternativa a expires_at: vigencia en días desde hoy.",
+    )
+
+
+class ReadOnlySqlRequest(BaseModel):
+    """Solicitud para ejecutar una consulta SQL SELECT de solo lectura sobre DuckDB efímero."""
+
+    sql: str = Field(..., min_length=6, description="Consulta SELECT o WITH de solo lectura")
+    limit: int = Field(default=500, ge=1, le=10000)
+    format: Literal["json", "parquet", "csv", "jsonl"] = Field(default="json")
 
 
 def _execute_export_dataset(
@@ -438,9 +477,184 @@ def export_datamart_csv(
     )
 
 
+def _build_jsonl_bytes(query_res: AnalyticsQueryResponse) -> bytes:
+    lines = [
+        json.dumps(
+            {c: rec.get(c) for c in (query_res.columns or rec.keys())},
+            ensure_ascii=False,
+            default=str,
+        )
+        for rec in query_res.records
+    ]
+    payload = ("\n".join(lines) + "\n") if lines else ""
+    return payload.encode("utf-8")
+
+
+def _build_parquet_bytes(query_res: AnalyticsQueryResponse) -> bytes:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        json_in = Path(tmpdir) / "export.json"
+        pq_out = Path(tmpdir) / "export.parquet"
+        con = duckdb.connect(":memory:")
+        try:
+            if query_res.records:
+                json_in.write_text(
+                    json.dumps(query_res.records, ensure_ascii=False, default=str),
+                    encoding="utf-8",
+                )
+                con.execute(
+                    f"COPY (SELECT * FROM read_json_auto('{json_in.as_posix()}')) "
+                    f"TO '{pq_out.as_posix()}' (FORMAT PARQUET, COMPRESSION ZSTD)"
+                )
+            else:
+                cols = query_res.columns or ["empty"]
+                cols_sql = ", ".join(
+                    f'CAST(NULL AS VARCHAR) AS "{c.replace(chr(34), "")}"' for c in cols
+                )
+                con.execute(
+                    f"COPY (SELECT {cols_sql} WHERE FALSE) "
+                    f"TO '{pq_out.as_posix()}' (FORMAT PARQUET, COMPRESSION ZSTD)"
+                )
+        finally:
+            con.close()
+        return pq_out.read_bytes()
+
+
+@router.get(
+    "/export/parquet",
+    summary="Descargar repositorio consolidado en formato columnar Apache Parquet ZSTD (Tarea 4.4)",
+)
+def export_datamart_parquet(
+    request: Request,
+    datamart: str = Query(default="catalogo_series_files"),
+    gestion: int | None = Query(default=None),
+    mes: int | None = Query(default=None),
+    institution_id: str | None = Query(default=None),
+) -> Response:
+    """Exporta registros consolidados en formato Apache Parquet ZSTD lossless."""
+    dm_clean = datamart.strip().lower()
+    query_res = _execute_export_dataset(
+        datamart=dm_clean,
+        gestion=gestion,
+        mes=mes,
+        institution_id=institution_id,
+    )
+    pq_bytes = _build_parquet_bytes(query_res)
+    try:
+        deps.api_key_repo.record_direct_export(
+            datamart_name=dm_clean,
+            export_format="PARQUET",
+            rows_returned=query_res.total_records,
+            client_agent=request.headers.get("user-agent"),
+        )
+    except Exception:
+        pass
+    filename = f"DATAX_{dm_clean}.parquet"
+    return Response(
+        content=pq_bytes,
+        media_type="application/vnd.apache.parquet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.get(
+    "/export/jsonl",
+    summary="Descargar repositorio consolidado en formato JSON Lines / NDJSON (Tarea 4.4)",
+)
+def export_datamart_jsonl(
+    request: Request,
+    datamart: str = Query(default="catalogo_series_files"),
+    gestion: int | None = Query(default=None),
+    mes: int | None = Query(default=None),
+    institution_id: str | None = Query(default=None),
+) -> Response:
+    """Exporta registros consolidados en formato NDJSON listo para streaming en Python/R."""
+    dm_clean = datamart.strip().lower()
+    query_res = _execute_export_dataset(
+        datamart=dm_clean,
+        gestion=gestion,
+        mes=mes,
+        institution_id=institution_id,
+    )
+    jsonl_bytes = _build_jsonl_bytes(query_res)
+    try:
+        deps.api_key_repo.record_direct_export(
+            datamart_name=dm_clean,
+            export_format="JSONL",
+            rows_returned=query_res.total_records,
+            client_agent=request.headers.get("user-agent"),
+        )
+    except Exception:
+        pass
+    filename = f"DATAX_{dm_clean}.jsonl"
+    return Response(
+        content=jsonl_bytes,
+        media_type="application/x-ndjson",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.post(
+    "/sql",
+    response_model=None,
+    summary="Ejecutar consulta SQL SELECT de solo lectura sobre DuckDB efímero in-memory (Tarea 4.4)",
+)
+def execute_readonly_sql(
+    payload: ReadOnlySqlRequest,
+    request: Request,
+    x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+) -> Response | dict[str, Any]:
+    """Ejecuta SELECT/WITH seguro sobre el catálogo cerrado de datasets Gold y permite exportar."""
+    if x_api_key:
+        entry, code, reason = deps.api_key_repo.authorize_and_log(
+            raw_key=x_api_key,
+            datamart_name="*",
+            export_format=f"SQL_{payload.format.upper()}",
+            rows_returned=0,
+            client_agent=request.headers.get("user-agent"),
+            required_layer="SQL",
+        )
+        if not entry:
+            raise HTTPException(status_code=code, detail=reason or "No autorizado.")
+
+    bulkhead = get_bulkhead_manager()
+    try:
+        if payload.format == "json":
+            return bulkhead.execute_analytics(
+                _readonly_sql_engine.execute_select,
+                payload.sql,
+                limit=payload.limit,
+            )
+        raw_bytes, media_type, row_count = bulkhead.execute_analytics(
+            _readonly_sql_engine.export_select,
+            payload.sql,
+            export_format=payload.format,
+            limit=payload.limit,
+        )
+        return Response(
+            content=raw_bytes,
+            media_type=media_type,
+            headers={
+                "Content-Disposition": f'attachment; filename="datax_sql_result.{payload.format}"',
+                "X-Row-Count": str(row_count),
+                "Access-Control-Expose-Headers": "X-Row-Count, Content-Disposition",
+            },
+        )
+    except UnsafeSqlError as err:
+        raise HTTPException(status_code=400, detail=str(err)) from err
+
+
+@router.get(
+    "/sql/tables",
+    summary="Listar tablas autorizadas disponibles para la consola SQL de solo lectura",
+)
+def list_readonly_sql_tables() -> dict[str, Any]:
+    """Devuelve los datasets Gold disponibles en el catálogo cerrado del motor SQL."""
+    return {"tables": _readonly_sql_engine.list_available_tables()}
+
+
 @router.get(
     "/keys",
-    summary="Listar llaves de conexión directa para Excel Power Query y Power BI",
+    summary="Listar llaves API de autoservicio con alcance de capas y expiración",
 )
 def list_api_keys() -> list[dict[str, Any]]:
     """Retorna las llaves de autoservicio emitidas y sus métricas de uso."""
@@ -449,13 +663,18 @@ def list_api_keys() -> list[dict[str, Any]]:
 
 @router.post(
     "/keys",
-    summary="Emitir nueva llave de conexión para Excel Power Query / Power BI",
+    summary="Emitir nueva llave API con alcance por capa/dataset y vigencia opcional",
 )
 def create_api_key(payload: CreateApiKeyRequest) -> dict[str, Any]:
-    """Genera una llave API lista para conectores externos sin requerir inicio de sesión."""
+    """Genera una llave API lista para Python, R, cURL y Power Query con expiración."""
+    exp = payload.expires_at
+    if exp is None and payload.expires_in_days is not None:
+        exp = datetime.now(timezone.utc) + timedelta(days=payload.expires_in_days)
     return deps.api_key_repo.create_key(
         label=payload.label,
         allowed_datamarts=payload.allowed_datamarts,
+        allowed_layers=payload.allowed_layers,
+        expires_at=exp,
     )
 
 
@@ -476,30 +695,47 @@ def revoke_api_key(key_id: str) -> dict[str, Any]:
 
 @router.get(
     "/access-logs",
-    summary="Consultar bitácora de extracciones de autoservicio",
+    summary="Consultar bitácora de extracciones permitidas y denegadas",
 )
 def list_self_service_access_logs(
     limit: int = Query(default=30, ge=1, le=200),
 ) -> list[dict[str, Any]]:
-    """Retorna el historial reciente de descargas directas y conexiones Power Query."""
+    """Retorna el historial reciente de descargas directas y consumo programático."""
     return deps.api_key_repo.list_access_logs(limit=limit)
+
+
+def _decode_cursor(cursor: str | None) -> int:
+    if not cursor:
+        return 0
+    try:
+        decoded = base64.urlsafe_b64decode(cursor.encode("ascii")).decode("ascii")
+        offset = int(decoded)
+        return max(0, offset)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Cursor de paginación inválido.")
+
+
+def _encode_cursor(offset: int) -> str:
+    return base64.urlsafe_b64encode(str(offset).encode("ascii")).decode("ascii")
 
 
 @router.get(
     "/live-feed/{datamart}",
-    summary="Conector directo autenticado por llave API para Excel Power Query y Power BI",
+    summary="Conector programático con API Key, paginación por cursor y streaming (Python/R/cURL)",
 )
 def get_power_query_live_feed(
     datamart: str,
     request: Request,
     api_key: str | None = Query(default=None, description="Llave API de autoservicio"),
     x_api_key: str | None = Header(default=None, alias="X-API-Key"),
-    format: str = Query(default="csv", pattern="^(csv|json)$"),
+    format: str = Query(default="csv", pattern="^(csv|json|jsonl|parquet)$"),
     gestion: int | None = Query(default=None),
     mes: int | None = Query(default=None),
     institution_id: str | None = Query(default=None),
+    cursor: str | None = Query(default=None, description="Cursor opaco de paginación"),
+    page_size: int | None = Query(default=None, ge=1, le=10000),
 ) -> Response:
-    """Entrega datos en vivo validando llave API y registrando auditoría de acceso."""
+    """Entrega datos validando llave API (vigencia y capa), paginación por cursor y streaming."""
     token = (api_key or x_api_key or "").strip()
     dm_clean = datamart.strip().lower()
     if dm_clean not in DATAMART_CATALOG:
@@ -508,6 +744,7 @@ def get_power_query_live_feed(
             detail=f"El repositorio '{datamart}' no existe.",
         )
 
+    offset = _decode_cursor(cursor)
     query_res = _execute_export_dataset(
         datamart=dm_clean,
         gestion=gestion,
@@ -515,32 +752,77 @@ def get_power_query_live_feed(
         institution_id=institution_id,
     )
 
-    validated = deps.api_key_repo.validate_and_log(
+    total_all = query_res.total_records
+    if page_size is not None or cursor is not None:
+        eff_page_size = page_size or 500
+        sliced_records = query_res.records[offset : offset + eff_page_size]
+        has_more = (offset + eff_page_size) < total_all
+        next_cursor = _encode_cursor(offset + eff_page_size) if has_more else None
+        paged_res = query_res.model_copy(
+            update={"records": sliced_records, "total_records": len(sliced_records)}
+        )
+    else:
+        has_more = False
+        next_cursor = None
+        paged_res = query_res
+
+    validated, auth_status, denial_reason = deps.api_key_repo.authorize_and_log(
         raw_key=token,
         datamart_name=dm_clean,
         export_format=f"LIVE_{format.upper()}",
-        rows_returned=query_res.total_records,
+        rows_returned=paged_res.total_records,
         client_agent=request.headers.get("user-agent"),
+        required_layer="GOLD",
     )
     if not validated:
         raise HTTPException(
-            status_code=401,
-            detail="Llave API ausente, inválida, revocada o sin autorización para este repositorio.",
+            status_code=auth_status,
+            detail=denial_reason
+            or "Llave API ausente, inválida, expirada, revocada o sin autorización.",
         )
 
-    if format.lower() == "json":
-        import json
+    extra_headers: dict[str, str] = {
+        "X-Total-Records": str(total_all),
+        "X-Has-More": "true" if has_more else "false",
+        "Access-Control-Expose-Headers": "X-Total-Records, X-Has-More, X-Next-Cursor",
+    }
+    if next_cursor:
+        extra_headers["X-Next-Cursor"] = next_cursor
 
+    fmt_low = format.lower()
+    if fmt_low == "json":
         body = json.dumps(
             {
                 "datamart": dm_clean,
-                "total_records": query_res.total_records,
-                "columns": query_res.columns,
-                "records": query_res.records,
+                "total_records": paged_res.total_records,
+                "total_available": total_all,
+                "has_more": has_more,
+                "next_cursor": next_cursor,
+                "columns": paged_res.columns,
+                "records": paged_res.records,
             },
             ensure_ascii=False,
+            default=str,
         ).encode("utf-8")
-        return Response(content=body, media_type="application/json; charset=utf-8")
+        return Response(content=body, media_type="application/json; charset=utf-8", headers=extra_headers)
 
-    csv_bytes = _build_csv_bytes(query_res)
-    return Response(content=csv_bytes, media_type="text/csv; charset=utf-8")
+    if fmt_low == "jsonl":
+        def _jsonl_stream():
+            cols = paged_res.columns
+            for rec in paged_res.records:
+                yield (
+                    json.dumps({c: rec.get(c) for c in (cols or rec.keys())}, ensure_ascii=False, default=str)
+                    + "\n"
+                ).encode("utf-8")
+        return StreamingResponse(_jsonl_stream(), media_type="application/x-ndjson", headers=extra_headers)
+
+    if fmt_low == "parquet":
+        pq_bytes = _build_parquet_bytes(paged_res)
+        return Response(
+            content=pq_bytes,
+            media_type="application/vnd.apache.parquet",
+            headers={**extra_headers, "Content-Disposition": f'attachment; filename="DATAX_{dm_clean}.parquet"'},
+        )
+
+    csv_bytes = _build_csv_bytes(paged_res)
+    return Response(content=csv_bytes, media_type="text/csv; charset=utf-8", headers=extra_headers)

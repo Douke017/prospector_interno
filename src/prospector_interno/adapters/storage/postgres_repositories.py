@@ -62,8 +62,17 @@ class PostgresDownloadTrackingAdapter(DownloadTrackingPort):
                         download_id, source_id, canonical_url, local_path,
                         status, sha256_checksum, bytes_downloaded, total_bytes,
                         consecutive_failures, last_error_code, task_id,
-                        subscribers, started_at, completed_at
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        subscribers, subscribers_jsonb, started_at, completed_at,
+                        priority, speed_bps, retry_count, max_retries, next_retry_at,
+                        worker_id, resource_key, dataset_code, period_label, etag,
+                        created_at, updated_at
+                    ) VALUES (
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                        %s, %s::jsonb, %s, %s,
+                        %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s, %s,
+                        NOW(), NOW()
+                    )
                     ON CONFLICT (download_id) DO UPDATE SET
                         status = EXCLUDED.status,
                         task_id = EXCLUDED.task_id,
@@ -71,9 +80,23 @@ class PostgresDownloadTrackingAdapter(DownloadTrackingPort):
                         sha256_checksum = COALESCE(EXCLUDED.sha256_checksum, public.download_tracking.sha256_checksum),
                         bytes_downloaded = EXCLUDED.bytes_downloaded,
                         total_bytes = EXCLUDED.total_bytes,
+                        consecutive_failures = EXCLUDED.consecutive_failures,
                         last_error_code = EXCLUDED.last_error_code,
+                        priority = EXCLUDED.priority,
+                        speed_bps = EXCLUDED.speed_bps,
+                        retry_count = EXCLUDED.retry_count,
+                        max_retries = EXCLUDED.max_retries,
+                        next_retry_at = EXCLUDED.next_retry_at,
+                        worker_id = COALESCE(EXCLUDED.worker_id, public.download_tracking.worker_id),
+                        resource_key = COALESCE(EXCLUDED.resource_key, public.download_tracking.resource_key),
+                        dataset_code = COALESCE(EXCLUDED.dataset_code, public.download_tracking.dataset_code),
+                        period_label = COALESCE(EXCLUDED.period_label, public.download_tracking.period_label),
+                        etag = COALESCE(EXCLUDED.etag, public.download_tracking.etag),
+                        subscribers = EXCLUDED.subscribers,
+                        subscribers_jsonb = EXCLUDED.subscribers_jsonb,
                         started_at = COALESCE(EXCLUDED.started_at, public.download_tracking.started_at),
-                        completed_at = COALESCE(EXCLUDED.completed_at, public.download_tracking.completed_at);
+                        completed_at = COALESCE(EXCLUDED.completed_at, public.download_tracking.completed_at),
+                        updated_at = NOW();
                     """,
                     (
                         record.download_id,
@@ -88,8 +111,19 @@ class PostgresDownloadTrackingAdapter(DownloadTrackingPort):
                         record.last_error_code,
                         record.task_id,
                         subscribers_json,
+                        subscribers_json,
                         started_str,
                         completed_str,
+                        record.priority,
+                        record.speed_bps,
+                        record.retry_count,
+                        record.max_retries,
+                        record.next_retry_at,
+                        record.worker_id,
+                        record.resource_key,
+                        record.dataset_code,
+                        record.period_label,
+                        record.etag,
                     ),
                 )
             conn.commit()
@@ -103,9 +137,12 @@ class PostgresDownloadTrackingAdapter(DownloadTrackingPort):
         local_path: str | None = None,
         sha256_checksum: str | None = None,
         error_code: str | None = None,
+        speed_bps: float | None = None,
+        retry_count: int | None = None,
+        worker_id: str | None = None,
     ) -> None:
         """Actualiza el estado y avance de una descarga en PostgreSQL."""
-        updates: list[str] = ["status = %s"]
+        updates: list[str] = ["status = %s", "updated_at = NOW()"]
         params: list[Any] = [status.value]
 
         if bytes_downloaded is not None:
@@ -123,12 +160,26 @@ class PostgresDownloadTrackingAdapter(DownloadTrackingPort):
         if error_code is not None:
             updates.append("last_error_code = %s")
             params.append(error_code)
+        if speed_bps is not None:
+            updates.append("speed_bps = %s")
+            params.append(speed_bps)
+        if retry_count is not None:
+            updates.append("retry_count = %s")
+            params.append(retry_count)
+        if worker_id is not None:
+            updates.append("worker_id = %s")
+            params.append(worker_id)
 
         if status == DownloadLifecycleStatus.DOWNLOADING:
             updates.append("started_at = COALESCE(started_at, %s)")
             params.append(datetime.now(timezone.utc).isoformat())
 
-        if status in (DownloadLifecycleStatus.COMPLETED, DownloadLifecycleStatus.FAILED):
+        if status in (
+            DownloadLifecycleStatus.COMPLETED,
+            DownloadLifecycleStatus.DEDUPLICATED,
+            DownloadLifecycleStatus.FAILED,
+            DownloadLifecycleStatus.CANCELLED,
+        ):
             updates.append("completed_at = %s")
             params.append(datetime.now(timezone.utc).isoformat())
 
@@ -139,6 +190,37 @@ class PostgresDownloadTrackingAdapter(DownloadTrackingPort):
             with conn.cursor() as cur:
                 cur.execute(sql, tuple(params))
             conn.commit()
+
+    def claim_next_pending(self, worker_id: str) -> DownloadRecord | None:
+        """Reclama atómicamente la siguiente descarga en cola mediante FOR UPDATE SKIP LOCKED."""
+        now_iso = datetime.now(timezone.utc).isoformat()
+        with get_readwrite_connection(self._config) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    WITH next_job AS (
+                        SELECT download_id
+                        FROM public.download_tracking
+                        WHERE status IN ('QUEUED', 'PENDING')
+                          AND (next_retry_at IS NULL OR next_retry_at <= NOW())
+                        ORDER BY priority ASC, created_at ASC
+                        FOR UPDATE SKIP LOCKED
+                        LIMIT 1
+                    )
+                    UPDATE public.download_tracking dt
+                    SET status = 'DOWNLOADING',
+                        worker_id = %s,
+                        started_at = COALESCE(dt.started_at, %s),
+                        updated_at = NOW()
+                    FROM next_job
+                    WHERE dt.download_id = next_job.download_id
+                    RETURNING dt.*;
+                    """,
+                    (worker_id, now_iso),
+                )
+                row = cur.fetchone()
+            conn.commit()
+        return self._row_to_record(row) if row else None
 
     def get_download(self, download_id: str) -> DownloadRecord | None:
         """Obtiene el detalle de una descarga por su ID."""
@@ -192,14 +274,14 @@ class PostgresDownloadTrackingAdapter(DownloadTrackingPort):
         return True
 
     def list_active_downloads(self) -> list[DownloadRecord]:
-        """Lista todas las descargas activas (DOWNLOADING) o en cola (PENDING)."""
+        """Lista todas las descargas activas o en cola."""
         with get_readwrite_connection(self._config) as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
                     SELECT * FROM public.download_tracking
-                    WHERE status IN ('PENDING', 'DOWNLOADING')
-                    ORDER BY started_at DESC NULLS LAST;
+                    WHERE status IN ('QUEUED', 'PENDING', 'DOWNLOADING', 'VERIFYING_SHA256')
+                    ORDER BY priority ASC, started_at DESC NULLS LAST;
                     """
                 )
                 rows = cur.fetchall()
@@ -219,7 +301,7 @@ class PostgresDownloadTrackingAdapter(DownloadTrackingPort):
                         SELECT * FROM public.download_tracking
                         WHERE UPPER(source_id) = UPPER(%s)
                         ORDER BY
-                            CASE WHEN status IN ('DOWNLOADING', 'PENDING') THEN 0 ELSE 1 END,
+                            CASE WHEN status IN ('DOWNLOADING', 'VERIFYING_SHA256', 'QUEUED', 'PENDING') THEN 0 ELSE 1 END,
                             COALESCE(completed_at, started_at) DESC NULLS LAST
                         LIMIT %s;
                         """,
@@ -230,7 +312,7 @@ class PostgresDownloadTrackingAdapter(DownloadTrackingPort):
                         """
                         SELECT * FROM public.download_tracking
                         ORDER BY
-                            CASE WHEN status IN ('DOWNLOADING', 'PENDING') THEN 0 ELSE 1 END,
+                            CASE WHEN status IN ('DOWNLOADING', 'VERIFYING_SHA256', 'QUEUED', 'PENDING') THEN 0 ELSE 1 END,
                             COALESCE(completed_at, started_at) DESC NULLS LAST
                         LIMIT %s;
                         """,
@@ -276,6 +358,16 @@ class PostgresDownloadTrackingAdapter(DownloadTrackingPort):
             subscribers=subscribers,
             started_at=started,
             completed_at=completed,
+            priority=int(row.get("priority") or 5),
+            speed_bps=float(row.get("speed_bps") or 0.0),
+            retry_count=int(row.get("retry_count") or 0),
+            max_retries=int(row.get("max_retries") if row.get("max_retries") is not None else 3),
+            next_retry_at=row.get("next_retry_at"),
+            worker_id=row.get("worker_id"),
+            resource_key=row.get("resource_key"),
+            dataset_code=row.get("dataset_code"),
+            period_label=row.get("period_label"),
+            etag=row.get("etag"),
         )
 
 
@@ -967,13 +1059,24 @@ class PostgresApiKeyRepository:
     def __init__(self, config: DatabaseConfig | None = None) -> None:
         self._config = config
 
-    def create_key(self, label: str, allowed_datamarts: str = "*") -> dict[str, Any]:
-        """Crea una llave API nueva, persiste solo su hash SHA-256 y devuelve el token."""
-        clean_label = label.strip() or "Conector Analítico Excel"
+    def create_key(
+        self,
+        label: str,
+        allowed_datamarts: str = "*",
+        allowed_layers: list[str] | None = None,
+        expires_at: datetime | None = None,
+    ) -> dict[str, Any]:
+        """Crea una llave API con alcance por capa/dataset y expiración opcional."""
+        clean_label = label.strip() or "Cliente Programático DATAX"
         raw_token = f"dtx_live_{secrets.token_hex(16)}"
         key_id = f"key_{secrets.token_hex(6)}"
         key_prefix = f"{raw_token[:13]}..."
         key_sha256 = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+        layers = [
+            lyr.strip().upper()
+            for lyr in (allowed_layers or ["RAW", "GOLD", "SQL"])
+            if lyr.strip()
+        ] or ["RAW", "GOLD", "SQL"]
 
         with get_readwrite_connection(self._config) as conn:
             with conn.cursor() as cur:
@@ -981,24 +1084,23 @@ class PostgresApiKeyRepository:
                     """
                     INSERT INTO public.api_keys (
                         key_id, label, key_prefix, key_sha256,
-                        allowed_datamarts, is_active
-                    ) VALUES (%s, %s, %s, %s, %s, TRUE)
+                        allowed_datamarts, allowed_layers, expires_at, is_active
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, TRUE)
                     RETURNING key_id, label, key_prefix, allowed_datamarts,
+                              allowed_layers, expires_at, revoked_at,
                               is_active, created_at, last_used_at, usage_count;
                     """,
-                    (key_id, clean_label, key_prefix, key_sha256, allowed_datamarts),
+                    (key_id, clean_label, key_prefix, key_sha256, allowed_datamarts, layers, expires_at),
                 )
                 row = dict(cur.fetchone() or {})
             conn.commit()
 
         row["api_key"] = raw_token
         row["raw_api_key"] = raw_token
-        row["created_at"] = (
-            row["created_at"].isoformat()
-            if hasattr(row.get("created_at"), "isoformat")
-            else str(row.get("created_at"))
-        )
-        row["last_used_at"] = None
+        for dt_col in ("created_at", "last_used_at", "expires_at", "revoked_at"):
+            val = row.get(dt_col)
+            if hasattr(val, "isoformat"):
+                row[dt_col] = val.isoformat()
         return row
 
     def list_keys(self) -> list[dict[str, Any]]:
@@ -1009,6 +1111,7 @@ class PostgresApiKeyRepository:
                     """
                     SELECT
                         key_id, label, key_prefix, allowed_datamarts,
+                        allowed_layers, expires_at, revoked_at,
                         is_active, created_at, last_used_at, usage_count
                     FROM public.api_keys
                     ORDER BY created_at DESC;
@@ -1017,7 +1120,7 @@ class PostgresApiKeyRepository:
                 rows = []
                 for r in cur.fetchall():
                     item = dict(r)
-                    for dt_col in ("created_at", "last_used_at"):
+                    for dt_col in ("created_at", "last_used_at", "expires_at", "revoked_at"):
                         val = item.get(dt_col)
                         if hasattr(val, "isoformat"):
                             item[dt_col] = val.isoformat()
@@ -1025,49 +1128,160 @@ class PostgresApiKeyRepository:
                 return rows
 
     def revoke_key(self, key_id: str) -> bool:
-        """Desactiva inmediatamente una llave API."""
+        """Desactiva inmediatamente una llave API registrando revoked_at."""
         with get_readwrite_connection(self._config) as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "UPDATE public.api_keys SET is_active = FALSE WHERE key_id = %s;",
+                    "UPDATE public.api_keys SET is_active = FALSE, revoked_at = NOW() WHERE key_id = %s;",
                     (key_id,),
                 )
                 changed = (cur.rowcount or 0) > 0
             conn.commit()
         return changed
 
-    def validate_and_log(
+    def _record_denied_log(
         self,
+        *,
+        key_id: str | None,
+        key_label: str | None,
+        datamart_name: str,
+        export_format: str,
+        client_agent: str | None,
+        denial_reason: str,
+        layer: str,
+    ) -> None:
+        try:
+            with get_readwrite_connection(self._config) as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        INSERT INTO public.access_logs (
+                            key_id, key_label, datamart_name, export_format,
+                            rows_returned, client_agent, status, denial_reason, layer
+                        ) VALUES (%s, %s, %s, %s, 0, %s, 'DENIED', %s, %s);
+                        """,
+                        (
+                            key_id,
+                            key_label or "Llave no autorizada",
+                            datamart_name,
+                            export_format,
+                            client_agent or "Cliente Externo",
+                            denial_reason,
+                            layer,
+                        ),
+                    )
+                conn.commit()
+        except Exception:
+            return
+
+    def authorize_and_log(
+        self,
+        *,
         raw_key: str,
         datamart_name: str,
         export_format: str,
         rows_returned: int,
         client_agent: str | None = None,
-    ) -> dict[str, Any] | None:
-        """Valida la llave API y registra la extracción en access_logs."""
+        required_layer: str = "GOLD",
+    ) -> tuple[dict[str, Any] | None, int, str | None]:
+        """Valida vigencia, revocación, capa y dataset; registra permitidos y denegados."""
+        layer_u = required_layer.strip().upper()
         if not raw_key or not raw_key.strip():
-            return None
+            self._record_denied_log(
+                key_id=None,
+                key_label=None,
+                datamart_name=datamart_name,
+                export_format=export_format,
+                client_agent=client_agent,
+                denial_reason="MISSING_API_KEY",
+                layer=layer_u,
+            )
+            return None, 401, "Llave API ausente."
+
         key_sha256 = hashlib.sha256(raw_key.strip().encode("utf-8")).hexdigest()
+        now_utc = datetime.now(timezone.utc)
 
         with get_readwrite_connection(self._config) as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT key_id, label, allowed_datamarts, is_active
+                    SELECT key_id, label, allowed_datamarts, allowed_layers,
+                           expires_at, is_active
                     FROM public.api_keys
                     WHERE key_sha256 = %s;
                     """,
                     (key_sha256,),
                 )
                 key_row = cur.fetchone()
-                if not key_row or not key_row["is_active"]:
-                    return None
+                if not key_row:
+                    self._record_denied_log(
+                        key_id=None,
+                        key_label=None,
+                        datamart_name=datamart_name,
+                        export_format=export_format,
+                        client_agent=client_agent,
+                        denial_reason="INVALID_API_KEY",
+                        layer=layer_u,
+                    )
+                    return None, 401, "Llave API inválida."
+
+                if not key_row["is_active"]:
+                    self._record_denied_log(
+                        key_id=key_row["key_id"],
+                        key_label=key_row["label"],
+                        datamart_name=datamart_name,
+                        export_format=export_format,
+                        client_agent=client_agent,
+                        denial_reason="REVOKED_API_KEY",
+                        layer=layer_u,
+                    )
+                    return None, 401, "Llave API revocada."
+
+                exp = key_row.get("expires_at")
+                if exp is not None:
+                    exp_utc = exp if exp.tzinfo is not None else exp.replace(tzinfo=timezone.utc)
+                    if exp_utc <= now_utc:
+                        self._record_denied_log(
+                            key_id=key_row["key_id"],
+                            key_label=key_row["label"],
+                            datamart_name=datamart_name,
+                            export_format=export_format,
+                            client_agent=client_agent,
+                            denial_reason="EXPIRED_API_KEY",
+                            layer=layer_u,
+                        )
+                        return None, 401, "Llave API expirada."
+
+                allowed_layers = [
+                    str(x).upper()
+                    for x in (key_row.get("allowed_layers") or ["RAW", "GOLD", "SQL"])
+                ]
+                if "*" not in allowed_layers and layer_u not in allowed_layers:
+                    self._record_denied_log(
+                        key_id=key_row["key_id"],
+                        key_label=key_row["label"],
+                        datamart_name=datamart_name,
+                        export_format=export_format,
+                        client_agent=client_agent,
+                        denial_reason=f"LAYER_FORBIDDEN:{layer_u}",
+                        layer=layer_u,
+                    )
+                    return None, 403, f"Llave API sin permiso sobre la capa '{layer_u}'."
 
                 allowed = str(key_row["allowed_datamarts"] or "*").strip()
-                if allowed != "*":
+                if allowed != "*" and datamart_name != "*":
                     allowed_set = {x.strip().lower() for x in allowed.split(",") if x.strip()}
                     if datamart_name.lower() not in allowed_set:
-                        return None
+                        self._record_denied_log(
+                            key_id=key_row["key_id"],
+                            key_label=key_row["label"],
+                            datamart_name=datamart_name,
+                            export_format=export_format,
+                            client_agent=client_agent,
+                            denial_reason=f"DATAMART_FORBIDDEN:{datamart_name}",
+                            layer=layer_u,
+                        )
+                        return None, 403, f"Llave API sin autorización para '{datamart_name}'."
 
                 cur.execute(
                     """
@@ -1081,8 +1295,8 @@ class PostgresApiKeyRepository:
                     """
                     INSERT INTO public.access_logs (
                         key_id, key_label, datamart_name, export_format,
-                        rows_returned, client_agent
-                    ) VALUES (%s, %s, %s, %s, %s, %s);
+                        rows_returned, client_agent, status, layer
+                    ) VALUES (%s, %s, %s, %s, %s, %s, 'ALLOWED', %s);
                     """,
                     (
                         key_row["key_id"],
@@ -1090,11 +1304,29 @@ class PostgresApiKeyRepository:
                         datamart_name,
                         export_format,
                         rows_returned,
-                        client_agent or "Excel Power Query / Power BI",
+                        client_agent or "Cliente Programático DATAX",
+                        layer_u,
                     ),
                 )
             conn.commit()
-        return dict(key_row)
+        return dict(key_row), 200, None
+
+    def validate_and_log(
+        self,
+        raw_key: str,
+        datamart_name: str,
+        export_format: str,
+        rows_returned: int,
+        client_agent: str | None = None,
+    ) -> dict[str, Any] | None:
+        entry, code, _ = self.authorize_and_log(
+            raw_key=raw_key,
+            datamart_name=datamart_name,
+            export_format=export_format,
+            rows_returned=rows_returned,
+            client_agent=client_agent,
+        )
+        return entry if code == 200 else None
 
     def record_direct_export(
         self,
@@ -1131,7 +1363,8 @@ class PostgresApiKeyRepository:
                     """
                     SELECT
                         log_id, key_id, key_label, datamart_name,
-                        export_format, rows_returned, client_agent, accessed_at
+                        export_format, rows_returned, client_agent,
+                        status, denial_reason, layer, accessed_at
                     FROM public.access_logs
                     ORDER BY accessed_at DESC
                     LIMIT %s;

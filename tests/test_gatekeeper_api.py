@@ -123,17 +123,25 @@ def test_api_evaluate_returns_reuse_derivation() -> None:
 
 
 def test_api_evaluate_incomplete_derivation_allows_download() -> None:
-    """Verifica que si no es derivable, el Gatekeeper procede a descarga."""
+    """Verifica que si no es derivable, DRY_RUN no bloquea y ACQUIRE_LOCK adquiere lock."""
     payload = {
         "dataset_code": "mart_cartera",
         "period": "2025",
         "target_url": "https://finrural.org.bo/data/2025_anual.pdf",
     }
-    response = client.post("/api/v1/gatekeeper/evaluate", json=payload)
+    dry_response = client.post("/api/v1/gatekeeper/evaluate", json=payload)
+    assert dry_response.status_code == 200
+    dry_data = dry_response.json()
+    assert dry_data["verdict"] == PreFlightVerdict.PROCEED_DOWNLOAD
+    assert dry_data["lock_acquired"] is False
+    assert len(dry_data["missing_periods"]) == 6
+
+    response = client.post(
+        "/api/v1/gatekeeper/evaluate",
+        json={**payload, "mode": "ACQUIRE_LOCK"},
+    )
     assert response.status_code == 200
     data = response.json()
-
-    # Como no es derivable en Gold ni existe en Bronze, concede el lock de descarga
     assert data["verdict"] == PreFlightVerdict.PROCEED_DOWNLOAD
     assert data["lock_acquired"] is True
     assert len(data["missing_periods"]) == 6

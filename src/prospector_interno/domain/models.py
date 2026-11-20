@@ -7,8 +7,12 @@ prevenir efectos secundarios en procesamiento concurrente.
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
+
+
+GatekeeperMode = Literal["DRY_RUN", "ACQUIRE_LOCK"]
 
 
 class Periodicity(str, Enum):
@@ -92,7 +96,10 @@ class IngestionRequest(BaseModel):
         description="Identificador del periodo (ej. '2026-08', '2026-Q2')",
     )
     checksum_sha256: str | None = None
+    etag: str | None = None
     force_refresh: bool = False
+    mode: GatekeeperMode = "ACQUIRE_LOCK"
+    lock_ttl_seconds: int = Field(default=300, ge=1, le=3600)
     requested_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc)
     )
@@ -137,6 +144,9 @@ class PreFlightEvaluation(BaseModel):
     derivation_query: str | None = None
     missing_periods: list[str] = Field(default_factory=list)
     subscribers_count: int = 0
+    action_links: dict[str, str | None] = Field(default_factory=dict)
+    latency_ms: float = 0.0
+    dedup_criterion: str | None = None
 
 
 class ResourceChangeCategory(str, Enum):

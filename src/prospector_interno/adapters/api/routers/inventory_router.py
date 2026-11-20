@@ -91,6 +91,11 @@ class UpdateUrlInventoryRequest(BaseModel):
         None,
         description="Estado de adquisición/descarga asignado por el analista",
     )
+    override_reason: Optional[str] = Field(
+        None,
+        description="Justificación técnica escrita para sobreescritura excepcional",
+    )
+    actor: str = Field(default="MANUAL_OPERATOR")
 
 
 class SourceStatsItem(BaseModel):
@@ -421,6 +426,35 @@ def update_inventory_url_status(
                     (row_id,),
                 )
                 updated = cur.fetchone() or row
+                if request.override_reason:
+                    import uuid as _uuid
+
+                    cur.execute("SAVEPOINT sp_inv_audit;")
+                    try:
+                        cur.execute(
+                            """
+                            INSERT INTO public.inventory_status_audit (
+                                audit_id, url_id, canonical_url, source_id,
+                                previous_is_downloaded, new_is_downloaded,
+                                previous_is_processed, new_is_processed,
+                                actor, override_reason
+                            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
+                            """,
+                            (
+                                f"invaud_{_uuid.uuid4().hex[:10]}",
+                                row_id,
+                                row["canonical_url"],
+                                row["source_id"],
+                                bool(row["is_downloaded"]),
+                                bool(updated["is_downloaded"]),
+                                bool(row["is_processed"]),
+                                bool(updated["is_processed"]),
+                                request.actor,
+                                request.override_reason.strip(),
+                            ),
+                        )
+                    except Exception:
+                        cur.execute("ROLLBACK TO SAVEPOINT sp_inv_audit;")
             conn.commit()
     else:
         with _get_conn() as conn:

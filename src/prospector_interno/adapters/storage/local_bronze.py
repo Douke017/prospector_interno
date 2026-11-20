@@ -40,6 +40,18 @@ class LocalBronzeStorage(BronzeStoragePort):
         self._index_by_key: dict[str, BronzeArtifact] = {}
         self._load_manifest()
 
+    @property
+    def base_path(self) -> Path:
+        """Directorio raíz del repositorio Bronze en disco."""
+        return self._base_path
+
+    def find_by_artifact_id(self, artifact_id: str) -> BronzeArtifact | None:
+        """Localiza un artefacto Bronze por su artifact_id."""
+        for art in self._index_by_checksum.values():
+            if art.artifact_id == artifact_id:
+                return art
+        return None
+
     def _resolve_stored_path(self, raw_file_path: str, sha256_hash: str) -> Path:
         """Resuelve rutas relativas de manifiestos independientemente del CWD."""
         raw_path = Path(raw_file_path)
@@ -301,9 +313,10 @@ class LocalBronzeStorage(BronzeStoragePort):
         if exact is not None:
             return exact
 
-        # 2. Búsqueda tolerante por período e institución/dominio
-        for (d, code, p), art in self._index_by_period.items():
-            if p == period and (d == domain or code == dataset_code):
+        # 2. Búsqueda tolerante solo por mismo dataset_code y período (evita falsos positivos entre series del mismo dominio)
+        ds_low = dataset_code.strip().lower()
+        for (_d, code, p), art in self._index_by_period.items():
+            if p == period and code.strip().lower() == ds_low:
                 return art
 
         return None

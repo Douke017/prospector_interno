@@ -236,11 +236,11 @@ def test_obj_4_self_service_views_excel_csv_and_api_key_live_feed() -> None:
     assert live_json.status_code == 200
     assert live_json.json()["total_records"] > 0
 
-    # Acceso denegado a datamart fuera del alcance de la llave
+    # Acceso denegado a datamart fuera del alcance de la llave (HTTP 403 Forbidden)
     forbidden_dm = client.get(
         f"/api/v1/analytics/live-feed/bases_datos_cubos?api_key={raw_token}"
     )
-    assert forbidden_dm.status_code == 401
+    assert forbidden_dm.status_code == 403
 
     # Verificar registro en bitácora de extracciones
     logs_resp = client.get("/api/v1/analytics/access-logs")

@@ -52,8 +52,10 @@ class DownloadStateFilter:
             )
 
         if record.status in (
+            DownloadLifecycleStatus.QUEUED,
             DownloadLifecycleStatus.DOWNLOADING,
             DownloadLifecycleStatus.PENDING,
+            DownloadLifecycleStatus.VERIFYING_SHA256,
         ):
             # Suscribir petición concurrente a la tarea activa (DoD)
             self._tracking_port.subscribe_request(
@@ -70,6 +72,8 @@ class DownloadStateFilter:
             status_str = (
                 "en curso de descarga"
                 if record.status == DownloadLifecycleStatus.DOWNLOADING
+                else "verificando SHA-256"
+                if record.status == DownloadLifecycleStatus.VERIFYING_SHA256
                 else "en cola de espera"
             )
             return DownloadStateEvaluationResult(
@@ -86,7 +90,10 @@ class DownloadStateFilter:
                 ),
             )
 
-        if record.status == DownloadLifecycleStatus.COMPLETED:
+        if record.status in (
+            DownloadLifecycleStatus.COMPLETED,
+            DownloadLifecycleStatus.DEDUPLICATED,
+        ):
             chk = record.sha256_checksum[:12] if record.sha256_checksum else "N/A"
             return DownloadStateEvaluationResult(
                 is_in_progress=False,
@@ -97,21 +104,24 @@ class DownloadStateFilter:
                 verdict_status="COMPLETED",
                 explanation=(
                     f"Archivo fuente ya descargado con éxito en '{record.local_path}' "
-                    f"(checksum: {chk})."
+                    f"(estado: {record.status.value}, checksum: {chk})."
                 ),
             )
 
-        if record.status == DownloadLifecycleStatus.FAILED:
+        if record.status in (
+            DownloadLifecycleStatus.FAILED,
+            DownloadLifecycleStatus.CANCELLED,
+        ):
             return DownloadStateEvaluationResult(
                 is_in_progress=False,
                 status=record.status,
                 task_id=record.task_id,
                 download_id=record.download_id,
                 subscribers_count=len(record.subscribers),
-                verdict_status="FAILED",
+                verdict_status=record.status.value,
                 explanation=(
-                    f"Descarga previa fallida (error: {record.last_error_code}). "
-                    "Se requiere reintento o saneamiento de conexión."
+                    f"Descarga previa en estado {record.status.value} "
+                    f"(error: {record.last_error_code}). Se permite reintentar."
                 ),
             )
 

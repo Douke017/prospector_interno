@@ -4,10 +4,12 @@ Expone los contratos de integración para que el equipo de Portal Nexus pueda
 consultar el catálogo activo, evaluar pre-vuelo e interrogar mapas externos.
 """
 
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 
+from prospector_interno.adapters.api import dependencies as deps
 from prospector_interno.adapters.api.routers import (
     analytics_router,
     bridge_router,
@@ -20,7 +22,19 @@ from prospector_interno.adapters.api.routers import (
     search_router,
 )
 
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    if not deps.is_isolated_test_mode():
+        deps.download_worker_pool.start()
+    try:
+        yield
+    finally:
+        deps.download_worker_pool.stop()
+
+
 app = FastAPI(
+    lifespan=_lifespan,
     title="DATAX Prospector Interno & Portal Nexus API",
     description=(
         "**API Oficial del Prospector Interno (DATAX Equipo 2)**\n\n"

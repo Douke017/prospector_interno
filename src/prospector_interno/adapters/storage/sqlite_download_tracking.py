@@ -54,7 +54,17 @@ class SqliteDownloadTrackingAdapter(DownloadTrackingPort):
                     task_id TEXT,
                     subscribers TEXT DEFAULT '[]',
                     started_at TEXT,
-                    completed_at TEXT
+                    completed_at TEXT,
+                    priority INTEGER DEFAULT 5,
+                    speed_bps REAL DEFAULT 0.0,
+                    retry_count INTEGER DEFAULT 0,
+                    max_retries INTEGER DEFAULT 3,
+                    next_retry_at TEXT,
+                    worker_id TEXT,
+                    resource_key TEXT,
+                    dataset_code TEXT,
+                    period_label TEXT,
+                    etag TEXT
                 );
                 """
             )
@@ -91,14 +101,31 @@ class SqliteDownloadTrackingAdapter(DownloadTrackingPort):
                     download_id, source_id, canonical_url, local_path,
                     status, sha256_checksum, bytes_downloaded, total_bytes,
                     consecutive_failures, last_error_code, task_id,
-                    subscribers, started_at, completed_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    subscribers, started_at, completed_at,
+                    priority, speed_bps, retry_count, max_retries,
+                    next_retry_at, worker_id, resource_key, dataset_code,
+                    period_label, etag
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(download_id) DO UPDATE SET
                     status = excluded.status,
                     task_id = excluded.task_id,
+                    local_path = COALESCE(excluded.local_path, download_tracking.local_path),
+                    sha256_checksum = COALESCE(excluded.sha256_checksum, download_tracking.sha256_checksum),
                     bytes_downloaded = excluded.bytes_downloaded,
                     total_bytes = excluded.total_bytes,
+                    consecutive_failures = excluded.consecutive_failures,
                     last_error_code = excluded.last_error_code,
+                    priority = excluded.priority,
+                    speed_bps = excluded.speed_bps,
+                    retry_count = excluded.retry_count,
+                    max_retries = excluded.max_retries,
+                    next_retry_at = excluded.next_retry_at,
+                    worker_id = COALESCE(excluded.worker_id, download_tracking.worker_id),
+                    resource_key = COALESCE(excluded.resource_key, download_tracking.resource_key),
+                    dataset_code = COALESCE(excluded.dataset_code, download_tracking.dataset_code),
+                    period_label = COALESCE(excluded.period_label, download_tracking.period_label),
+                    etag = COALESCE(excluded.etag, download_tracking.etag),
+                    subscribers = excluded.subscribers,
                     started_at = COALESCE(
                         excluded.started_at, download_tracking.started_at
                     ),
@@ -121,6 +148,16 @@ class SqliteDownloadTrackingAdapter(DownloadTrackingPort):
                     subscribers_json,
                     started_str,
                     completed_str,
+                    record.priority,
+                    record.speed_bps,
+                    record.retry_count,
+                    record.max_retries,
+                    record.next_retry_at.isoformat() if record.next_retry_at else None,
+                    record.worker_id,
+                    record.resource_key,
+                    record.dataset_code,
+                    record.period_label,
+                    record.etag,
                 ),
             )
 
@@ -133,6 +170,9 @@ class SqliteDownloadTrackingAdapter(DownloadTrackingPort):
         local_path: str | None = None,
         sha256_checksum: str | None = None,
         error_code: str | None = None,
+        speed_bps: float | None = None,
+        retry_count: int | None = None,
+        worker_id: str | None = None,
     ) -> None:
         """Actualiza el estado y progreso de una descarga."""
         with self._lock:
@@ -155,10 +195,21 @@ class SqliteDownloadTrackingAdapter(DownloadTrackingPort):
             if error_code is not None:
                 updates.append("last_error_code = ?")
                 params.append(error_code)
+            if speed_bps is not None:
+                updates.append("speed_bps = ?")
+                params.append(speed_bps)
+            if retry_count is not None:
+                updates.append("retry_count = ?")
+                params.append(retry_count)
+            if worker_id is not None:
+                updates.append("worker_id = ?")
+                params.append(worker_id)
 
             if status in (
                 DownloadLifecycleStatus.COMPLETED,
+                DownloadLifecycleStatus.DEDUPLICATED,
                 DownloadLifecycleStatus.FAILED,
+                DownloadLifecycleStatus.CANCELLED,
             ):
                 updates.append("completed_at = ?")
                 params.append(datetime.now(timezone.utc).isoformat())
@@ -168,14 +219,49 @@ class SqliteDownloadTrackingAdapter(DownloadTrackingPort):
             params.append(download_id)
             cur.execute(query, tuple(params))
 
+    def claim_next_pending(self, worker_id: str) -> DownloadRecord | None:
+        """Reclama atómicamente la siguiente tarea QUEUED/PENDING en SQLite."""
+        with self._lock:
+            cur = self._conn.cursor()
+            cur.execute(
+                """
+                SELECT * FROM download_tracking
+                WHERE status IN ('QUEUED', 'PENDING')
+                ORDER BY priority ASC, started_at ASC
+                LIMIT 1;
+                """
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+            dl_id = row["download_id"]
+            now_iso = datetime.now(timezone.utc).isoformat()
+            cur.execute(
+                """
+                UPDATE download_tracking
+                SET status = 'DOWNLOADING', worker_id = ?, started_at = COALESCE(started_at, ?)
+                WHERE download_id = ?;
+                """,
+                (worker_id, now_iso, dl_id),
+            )
+            cur.execute("SELECT * FROM download_tracking WHERE download_id = ?;", (dl_id,))
+            claimed = cur.fetchone()
+            return self._row_to_record(claimed) if claimed else None
+
     def _row_to_record(self, row: sqlite3.Row) -> DownloadRecord:
         """Convierte una fila SQL en modelo inmutable de dominio."""
+        keys = set(row.keys())
         started = (
             datetime.fromisoformat(row["started_at"]) if row["started_at"] else None
         )
         completed = (
             datetime.fromisoformat(row["completed_at"])
             if row["completed_at"]
+            else None
+        )
+        next_retry = (
+            datetime.fromisoformat(row["next_retry_at"])
+            if "next_retry_at" in keys and row["next_retry_at"]
             else None
         )
         subscribers_raw = row["subscribers"] or "[]"
@@ -199,6 +285,16 @@ class SqliteDownloadTrackingAdapter(DownloadTrackingPort):
             subscribers=subscribers,
             started_at=started,
             completed_at=completed,
+            priority=int(row["priority"]) if "priority" in keys and row["priority"] is not None else 5,
+            speed_bps=float(row["speed_bps"]) if "speed_bps" in keys and row["speed_bps"] is not None else 0.0,
+            retry_count=int(row["retry_count"]) if "retry_count" in keys and row["retry_count"] is not None else 0,
+            max_retries=int(row["max_retries"]) if "max_retries" in keys and row["max_retries"] is not None else 3,
+            next_retry_at=next_retry,
+            worker_id=row["worker_id"] if "worker_id" in keys else None,
+            resource_key=row["resource_key"] if "resource_key" in keys else None,
+            dataset_code=row["dataset_code"] if "dataset_code" in keys else None,
+            period_label=row["period_label"] if "period_label" in keys else None,
+            etag=row["etag"] if "etag" in keys else None,
         )
 
     def get_download(self, download_id: str) -> DownloadRecord | None:
@@ -255,14 +351,14 @@ class SqliteDownloadTrackingAdapter(DownloadTrackingPort):
             return True
 
     def list_active_downloads(self) -> list[DownloadRecord]:
-        """Lista todas las descargas en cola (PENDING) o activas (DOWNLOADING)."""
+        """Lista todas las descargas en cola o activas."""
         with self._lock:
             cur = self._conn.cursor()
             cur.execute(
                 """
                 SELECT * FROM download_tracking
-                WHERE status IN ('PENDING', 'DOWNLOADING')
-                ORDER BY started_at DESC;
+                WHERE status IN ('QUEUED', 'PENDING', 'DOWNLOADING', 'VERIFYING_SHA256')
+                ORDER BY priority ASC, started_at DESC;
                 """
             )
             rows = cur.fetchall()
@@ -282,7 +378,7 @@ class SqliteDownloadTrackingAdapter(DownloadTrackingPort):
                     SELECT * FROM download_tracking
                     WHERE UPPER(source_id) = UPPER(?)
                     ORDER BY
-                        CASE WHEN status IN ('DOWNLOADING', 'PENDING') THEN 0 ELSE 1 END,
+                        CASE WHEN status IN ('DOWNLOADING', 'VERIFYING_SHA256', 'QUEUED', 'PENDING') THEN 0 ELSE 1 END,
                         COALESCE(completed_at, started_at) DESC
                     LIMIT ?;
                     """,
@@ -293,7 +389,7 @@ class SqliteDownloadTrackingAdapter(DownloadTrackingPort):
                     """
                     SELECT * FROM download_tracking
                     ORDER BY
-                        CASE WHEN status IN ('DOWNLOADING', 'PENDING') THEN 0 ELSE 1 END,
+                        CASE WHEN status IN ('DOWNLOADING', 'VERIFYING_SHA256', 'QUEUED', 'PENDING') THEN 0 ELSE 1 END,
                         COALESCE(completed_at, started_at) DESC
                     LIMIT ?;
                     """,
