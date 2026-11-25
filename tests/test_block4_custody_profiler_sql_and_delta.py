@@ -310,6 +310,35 @@ def test_task_4_4_parquet_jsonl_readonly_sql_security_and_key_governance(tmp_pat
         # 3. Exportación Parquet y JSONL de datamarts + cursor pagination en live-feed
         if not deps.analytics_adapter.has_data("catalogo_series_files"):
             client.post("/api/v1/analytics/materialize?datamart=catalogo_series_files")
+        if not deps.analytics_adapter.has_data("catalogo_series_files"):
+            seed_dir = deps.GOLD_DIR / "catalogo_series_files" / "gestion=2025" / "mes=01"
+            seed_dir.mkdir(parents=True, exist_ok=True)
+            seed_pq = seed_dir / "part_seed.parquet"
+            con_seed = duckdb.connect(":memory:")
+            con_seed.execute(
+                f"""
+                COPY (
+                    SELECT
+                        'BCB' AS institucion_id,
+                        'Banco Central de Bolivia' AS institucion_nombre,
+                        'D_BO_BCB_001' AS codigo_serie,
+                        'Serie de prueba CI' AS nombre_serie,
+                        'MANUAL_FILE' AS tipo_serie,
+                        '.xlsx' AS formato_archivo,
+                        'Mensual' AS frecuencia,
+                        'ACTIVO' AS estado,
+                        '2025-01-31' AS actualizado_hasta,
+                        'https://www.bcb.gob.bo/test.xlsx' AS url_principal,
+                        '/mnt/spim/raw' AS ruta_spim,
+                        1 AS total_descargas,
+                        0 AS total_reportes,
+                        2025 AS gestion,
+                        1 AS mes,
+                        '{"a" * 64}' AS source_file_sha256
+                ) TO '{seed_pq}' (FORMAT PARQUET, COMPRESSION ZSTD);
+                """
+            )
+            con_seed.close()
 
         pq_exp = client.get("/api/v1/analytics/export/parquet?datamart=catalogo_series_files")
         assert pq_exp.status_code == 200

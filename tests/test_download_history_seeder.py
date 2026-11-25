@@ -8,6 +8,8 @@ DownloadTrackingPort (SqliteDownloadTrackingAdapter).
 from pathlib import Path
 import pytest
 
+pytestmark = pytest.mark.legacy_pg
+
 from prospector_interno.adapters.legacy.backup_seeder import PostgresLegacySeeder
 from prospector_interno.adapters.storage.sqlite_download_tracking import (
     SqliteDownloadTrackingAdapter,

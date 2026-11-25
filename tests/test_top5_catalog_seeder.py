@@ -7,6 +7,8 @@ estratégicos seleccionados de la base de datos de producción replicada.
 from pathlib import Path
 import pytest
 
+pytestmark = pytest.mark.legacy_pg
+
 from prospector_interno.adapters.legacy.backup_seeder import PostgresLegacySeeder
 from prospector_interno.adapters.memory_state import InMemoryCatalogRepository
 from prospector_interno.adapters.storage.sqlite_catalog_lineage import (

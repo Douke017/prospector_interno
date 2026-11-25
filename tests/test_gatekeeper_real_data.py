@@ -9,6 +9,8 @@ from pathlib import Path
 import time
 import pytest
 
+pytestmark = pytest.mark.legacy_pg
+
 from prospector_interno.adapters.legacy.backup_seeder import PostgresLegacySeeder
 from prospector_interno.adapters.memory_state import InMemoryGatekeeperState
 from prospector_interno.adapters.storage.local_bronze import LocalBronzeStorage

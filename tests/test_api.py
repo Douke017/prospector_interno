@@ -37,6 +37,7 @@ def test_openapi_schema_generation() -> None:
     assert "/api/v1/reconciliation/diff" in schema["paths"]
 
 
+@pytest.mark.legacy_pg
 def test_catalog_stats_endpoint() -> None:
     """Verifica endpoint de estadísticas consolidadas desde la vista materializada."""
     response = client.get("/api/v1/catalog/stats")
@@ -47,6 +48,7 @@ def test_catalog_stats_endpoint() -> None:
     assert data["view_status"] == "MATERIALIZED_IN_POSTGRESQL"
 
 
+@pytest.mark.legacy_pg
 def test_catalog_sources_filtering() -> None:
     """Verifica que solo retorna fuentes activas con series vigentes."""
     response = client.get("/api/v1/catalog/sources")
@@ -60,6 +62,7 @@ def test_catalog_sources_filtering() -> None:
     assert bcb["total_active_datasets"] > 500
 
 
+@pytest.mark.legacy_pg
 def test_catalog_datasets_search() -> None:
     """Verifica búsqueda parametrizada de series en la vista materializada."""
     response = client.get("/api/v1/catalog/datasets?source_code=BCB&limit=5")

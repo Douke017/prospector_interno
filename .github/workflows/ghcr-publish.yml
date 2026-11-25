@@ -47,8 +47,9 @@ jobs:
           psql -h 127.0.0.1 -p 5434 -U postgres -d platform_db -v ON_ERROR_STOP=1 -f migrations/standalone/000_init_standalone_schema.sql
           psql -h 127.0.0.1 -p 5434 -U postgres -d platform_db -v ON_ERROR_STOP=1 -f migrations/002_raw_data_prospector_evolution.sql
 
-      - name: Install dependencies
+      - name: Install system utilities (poppler-utils) & Python dependencies
         run: |
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends poppler-utils
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
 
@@ -94,6 +95,7 @@ jobs:
           context: .
           file: ./Dockerfile
           push: true
+          provenance: false
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha

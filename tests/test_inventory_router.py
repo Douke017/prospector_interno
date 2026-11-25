@@ -3,6 +3,8 @@
 from fastapi.testclient import TestClient
 import pytest
 
+pytestmark = pytest.mark.legacy_pg
+
 from prospector_interno.adapters.api.main import app
 
 client = TestClient(app)

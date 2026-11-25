@@ -6,6 +6,8 @@ from prospector_interno.adapters.legacy.backup_seeder import PostgresLegacySeede
 from prospector_interno.adapters.memory_state import InMemoryCatalogRepository
 from prospector_interno.domain.models import Periodicity
 
+pytestmark = pytest.mark.legacy_pg
+
 
 @pytest.fixture
 def seeder() -> PostgresLegacySeeder:

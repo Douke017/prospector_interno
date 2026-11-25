@@ -95,8 +95,9 @@ def test_readonly_connection_prohibits_dml() -> None:
         with conn.cursor() as cur:
             with pytest.raises(psycopg.errors.ReadOnlySqlTransaction):
                 cur.execute(
-                    "INSERT INTO source (name, short_name) "
-                    "VALUES ('Probe', 'PRB');"
+                    "INSERT INTO public.canonical_sources "
+                    "(source_id, canonical_code, official_name, short_name, country_iso, is_active) "
+                    "VALUES (999999, 'BO_PRB', 'Probe', 'PRB', 'BOL', TRUE);"
                 )
 
 

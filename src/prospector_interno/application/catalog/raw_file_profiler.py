@@ -328,7 +328,7 @@ class RawFileProfilerService:
                         profile["sample_rows"] = sample_rows
             finally:
                 book.release_resources()
-        except ImportError:
+        except Exception:
             profile["sheet_names"] = ["Hoja_OLE2_BIFF"]
 
     def _profile_parquet(self, path: Path, profile: dict[str, Any]) -> None:

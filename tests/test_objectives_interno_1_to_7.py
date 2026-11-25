@@ -6,10 +6,13 @@ import io
 import time
 
 import openpyxl
+import pytest
 from starlette.testclient import TestClient
 
 from prospector_interno.adapters.api import dependencies as deps
 from prospector_interno.adapters.api.main import app
+
+pytestmark = pytest.mark.legacy_pg
 
 client = TestClient(app)
 

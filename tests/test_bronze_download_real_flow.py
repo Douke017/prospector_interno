@@ -75,6 +75,7 @@ class MockPoliteStreamDownloader(HttpDownloaderPort):
         return io.BytesIO(self._content), 200, "application/pdf"
 
 
+@pytest.mark.legacy_pg
 def test_bronze_atomic_download_and_manifest_registration(tmp_path: Path) -> None:
     """Verifica el flujo completo de almacenamiento en Bronze para el dataset de APS."""
     # 1. Sembrado de catálogo
