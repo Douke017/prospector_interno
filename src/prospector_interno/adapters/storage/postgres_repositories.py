@@ -791,17 +791,22 @@ class PostgresUrlInventoryRepository:
 
         with get_readwrite_connection(self._config) as conn:
             with conn.cursor() as cur:
-                # 1. Por coincidencia con mv_nexus_active_catalog (canonical_dataset_code)
-                cur.execute(
-                    """
-                    SELECT target_url FROM public.mv_nexus_active_catalog
-                    WHERE UPPER(canonical_dataset_code) = UPPER(%s)
-                      AND target_url IS NOT NULL AND target_url <> ''
-                    LIMIT 1;
-                    """,
-                    (clean_ds,),
-                )
-                row = cur.fetchone()
+                # 1. Por coincidencia con mv_nexus_active_catalog (si existe vista legacy)
+                cur.execute("SAVEPOINT sp_mv_lookup;")
+                row = None
+                try:
+                    cur.execute(
+                        """
+                        SELECT target_url FROM public.mv_nexus_active_catalog
+                        WHERE UPPER(canonical_dataset_code) = UPPER(%s)
+                          AND target_url IS NOT NULL AND target_url <> ''
+                        LIMIT 1;
+                        """,
+                        (clean_ds,),
+                    )
+                    row = cur.fetchone()
+                except psycopg.Error:
+                    cur.execute("ROLLBACK TO SAVEPOINT sp_mv_lookup;")
                 if row and row.get("target_url"):
                     return str(row["target_url"])
 

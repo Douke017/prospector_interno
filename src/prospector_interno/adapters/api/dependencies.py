@@ -92,7 +92,7 @@ _IS_ISOLATED_TEST_BOOT: bool = (
 GOLD_DIR: Path = (
     Path(tempfile.mkdtemp(prefix="prospector_test_gold_"))
     if _IS_ISOLATED_TEST_BOOT
-    else (PROJECT_ROOT / "data" / "gold")
+    else Path(os.getenv("PROSPECTOR_GOLD_DIR", str(PROJECT_ROOT / "data" / "gold")))
 )
 
 

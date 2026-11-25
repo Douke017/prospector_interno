@@ -294,6 +294,121 @@ def _fallback_datasets_sqlite(
         ]
 
 
+def _standalone_stats_pg() -> CatalogStatsResponse | None:
+    """Consulta métricas operativas en modo PostgreSQL standalone (sin tablas legacy)."""
+    try:
+        with get_readonly_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        (SELECT COUNT(DISTINCT UPPER(source_id)) FROM public.url_inventory_map) AS inv_sources,
+                        (SELECT COUNT(*) FROM public.url_inventory_map) AS inv_urls,
+                        (SELECT COUNT(*) FROM public.internal_assets) AS assets_count,
+                        (SELECT COUNT(*) FROM public.download_tracking WHERE status = 'COMPLETED') AS dl_completed;
+                    """
+                )
+                row = cur.fetchone() or {}
+                return CatalogStatsResponse(
+                    total_active_sources=int(row.get("inv_sources") or 0),
+                    total_canonical_datasets=int(row.get("inv_urls") or row.get("assets_count") or 0),
+                    total_historical_downloads=int(row.get("dl_completed") or 0),
+                    view_status="STANDALONE_POSTGRESQL",
+                    query_engine="PostgreSQL 16 Standalone + DuckDB RO",
+                )
+    except (psycopg.Error, LegacySeederError):
+        return None
+
+
+def _standalone_sources_pg() -> list[SourceResponse] | None:
+    """Lista instituciones registradas en inventario o activos en modo PostgreSQL standalone."""
+    try:
+        with get_readonly_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        ROW_NUMBER() OVER (ORDER BY COUNT(*) DESC, UPPER(source_id) ASC) AS id_source,
+                        UPPER(source_id) AS short_name,
+                        COUNT(*) AS total_active_datasets
+                    FROM public.url_inventory_map
+                    GROUP BY UPPER(source_id)
+                    ORDER BY total_active_datasets DESC, short_name ASC;
+                    """
+                )
+                rows = cur.fetchall()
+                return [
+                    SourceResponse(
+                        source_id=int(r["id_source"]),
+                        canonical_code=f"BO_{r['short_name']}",
+                        official_name=str(r["short_name"]),
+                        short_name=str(r["short_name"]),
+                        homepage=None,
+                        country_iso="BOL",
+                        is_active=True,
+                        total_active_datasets=int(r["total_active_datasets"] or 0),
+                    )
+                    for r in rows
+                ]
+    except (psycopg.Error, LegacySeederError):
+        return None
+
+
+def _standalone_datasets_pg(
+    q: str | None = None,
+    source_code: str | None = None,
+    limit: int = 20,
+    offset: int = 0,
+) -> list[DatasetResponse] | None:
+    """Lista entradas del inventario curado en modo PostgreSQL standalone."""
+    try:
+        params: list[Any] = []
+        query = """
+            SELECT
+                id,
+                UPPER(source_id) AS source_code,
+                COALESCE(file_code, 'ITEM_' || id::text) AS file_code,
+                COALESCE(NULLIF(file_name, ''), canonical_url) AS dataset_name,
+                canonical_url,
+                sha256_hash,
+                updated_at,
+                CASE WHEN is_downloaded THEN 1 ELSE 0 END AS dl_count
+            FROM public.url_inventory_map
+            WHERE 1=1
+        """
+        if source_code:
+            query += " AND UPPER(source_id) = UPPER(%s)"
+            params.append(source_code)
+        if q:
+            query += " AND (file_name ILIKE %s OR canonical_url ILIKE %s OR COALESCE(file_code, '') ILIKE %s)"
+            like_term = f"%{q}%"
+            params.extend([like_term, like_term, like_term])
+        query += " ORDER BY is_downloaded DESC, id DESC LIMIT %s OFFSET %s;"
+        params.extend([limit, offset])
+
+        with get_readonly_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(query, params)
+                rows = cur.fetchall()
+                return [
+                    DatasetResponse(
+                        canonical_dataset_code=f"DS_BO_{r['source_code']}_{r['file_code']}",
+                        source_code=str(r["source_code"]),
+                        source_name=str(r["source_code"]),
+                        dataset_name=str(r["dataset_name"]),
+                        publication_frequency="Periódica",
+                        target_url=str(r["canonical_url"]),
+                        format_type=None,
+                        last_download_date=r.get("updated_at"),
+                        last_known_hash=r.get("sha256_hash"),
+                        total_historical_downloads=int(r.get("dl_count") or 0),
+                    )
+                    for r in rows
+                ]
+    except (psycopg.Error, LegacySeederError):
+        return None
+
+
 @router.get(
     "/stats",
     response_model=CatalogStatsResponse,
@@ -329,6 +444,9 @@ def get_catalog_stats() -> CatalogStatsResponse:
                     query_engine="DuckDB + PostgreSQL MV",
                 )
     except (psycopg.Error, LegacySeederError):
+        standalone = _standalone_stats_pg()
+        if standalone is not None and _get_sqlite_snapshot_path() is None:
+            return standalone
         return _fallback_stats_sqlite()
 
 
@@ -378,6 +496,9 @@ def list_active_sources() -> list[SourceResponse]:
                     for r in rows
                 ]
     except (psycopg.Error, LegacySeederError):
+        standalone = _standalone_sources_pg()
+        if standalone is not None and _get_sqlite_snapshot_path() is None:
+            return standalone
         return _fallback_sources_sqlite()
 
 
@@ -458,6 +579,11 @@ def search_datasets(
                     for r in rows
                 ]
     except (psycopg.Error, LegacySeederError):
+        standalone = _standalone_datasets_pg(
+            q=q, source_code=source_code, limit=limit, offset=offset
+        )
+        if standalone is not None and _get_sqlite_snapshot_path() is None:
+            return standalone
         return _fallback_datasets_sqlite(q=q, source_code=source_code, limit=limit, offset=offset)
 
 

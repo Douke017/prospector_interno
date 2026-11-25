@@ -1,12 +1,9 @@
 """Router de Búsqueda Federada Unificada (HUI-20, Sección 10.1)."""
 
 from datetime import datetime
-from pathlib import Path
 from fastapi import APIRouter, Query
 
-from prospector_interno.adapters.storage.sqlite_catalog_lineage import (
-    SqliteLineageAdapter,
-)
+from prospector_interno.adapters.api import dependencies as deps
 from prospector_interno.application.search.search_index_service import (
     SearchIndexService,
 )
@@ -16,9 +13,7 @@ from prospector_interno.domain.contracts.search_spec import (
 
 router = APIRouter(prefix="/search", tags=["8. Búsqueda Federada"])
 
-_default_lineage_adapter = SqliteLineageAdapter(
-    Path("data/catalog/datax_catalog.db")
-)
+_default_lineage_adapter = deps.lineage_adapter
 _search_service = SearchIndexService(_default_lineage_adapter)
 
 

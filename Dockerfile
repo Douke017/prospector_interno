@@ -16,14 +16,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY pyproject.toml ./
 COPY src ./src
 COPY migrations ./migrations
-COPY data ./data
 
-RUN pip install --no-cache-dir --upgrade pip && \
+RUN mkdir -p /app/data/bronze /app/data/gold /app/data/catalog /app/data/snapshot && \
+    pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -e .
 
 EXPOSE 8001
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
     CMD curl -fsS http://127.0.0.1:8001/health || exit 1
 
 CMD ["uvicorn", "prospector_interno.adapters.api.main:app", "--host", "0.0.0.0", "--port", "8001"]

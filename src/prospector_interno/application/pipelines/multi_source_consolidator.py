@@ -376,17 +376,36 @@ def consolidate_multi_source_repositories(
     stats: dict[str, dict[str, Any]] = {}
 
     try:
-        conn_ctx = get_readwrite_connection()
+        return _consolidate_from_postgres(
+            base_gold_path=base_gold_path,
+            lineage_tracker=lineage_tracker,
+            external_run_id=external_run_id,
+            ref_art=ref_art,
+            ref_sha=ref_sha,
+            target=target,
+        )
     except Exception:
-        conn_ctx = None
-
-    if conn_ctx is None:
         return stats
 
-    with conn_ctx as conn:
+
+def _consolidate_from_postgres(
+    *,
+    base_gold_path: Path,
+    lineage_tracker: LineageTracker,
+    external_run_id: str,
+    ref_art: BronzeArtifact | None,
+    ref_sha: str,
+    target: str | None,
+) -> dict[str, dict[str, Any]]:
+    stats: dict[str, dict[str, Any]] = {}
+    with get_readwrite_connection() as conn:
         with conn.cursor() as cur:
+            cur.execute("SELECT to_regclass('public.file') IS NOT NULL AS has_file;")
+            has_legacy_row = cur.fetchone() or {}
+            has_legacy_tables = bool(has_legacy_row.get("has_file"))
+
             # 1. catalogo_series_files (file + file9 de todas las fuentes)
-            if target in (None, "all", "catalogo_series_files"):
+            if has_legacy_tables and target in (None, "all", "catalogo_series_files"):
                 cur.execute(
                     """
                     SELECT
@@ -490,7 +509,7 @@ def consolidate_multi_source_repositories(
                 )
 
             # 2. historial_descargas_bruto (download + dag_run)
-            if target in (None, "all", "historial_descargas_bruto"):
+            if has_legacy_tables and target in (None, "all", "historial_descargas_bruto"):
                 cur.execute(
                     """
                     (
@@ -587,7 +606,7 @@ def consolidate_multi_source_repositories(
                 )
 
             # 3. reportes_conversiones (346 report + conversion + migration + data_base_report)
-            if target in (None, "all", "reportes_conversiones"):
+            if has_legacy_tables and target in (None, "all", "reportes_conversiones"):
                 cur.execute(
                     """
                     SELECT
@@ -678,7 +697,7 @@ def consolidate_multi_source_repositories(
                 )
 
             # 4. bases_datos_cubos (694 data_base + cubo + actualizacion + data_base_report)
-            if target in (None, "all", "bases_datos_cubos"):
+            if has_legacy_tables and target in (None, "all", "bases_datos_cubos"):
                 cur.execute(
                     """
                     SELECT

@@ -18,6 +18,10 @@ htmlcov/
 backup_10.0.0.12
 *.sql
 !migrations/*.sql
+!migrations/**/*.sql
+.env
+.env.*
+!.env.example
 *.tmp*
 data/
 bronze/

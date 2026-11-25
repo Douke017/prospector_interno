@@ -129,7 +129,7 @@ def get_database_config(
 _HOST_REACHABLE_CACHE: dict[tuple[str, int], tuple[float, bool]] = {}
 
 
-def _is_tcp_reachable(host: str, port: int, timeout: float = 0.6) -> bool:
+def _is_tcp_reachable(host: str, port: int, timeout: float = 2.0) -> bool:
     import socket
     import time
 
@@ -174,7 +174,7 @@ def get_replica_config(read_only: bool = False) -> DatabaseConfig:
     password = os.environ.get("PROSPECTOR_PG_PASSWORD", env_cfg.password)
     timeout = int(os.environ.get("PROSPECTOR_PG_TIMEOUT", "5"))
 
-    if not _is_tcp_reachable(host, port):
+    if "PROSPECTOR_PG_HOST" not in os.environ and not _is_tcp_reachable(host, port):
         return DatabaseConfig(
             host="127.0.0.1",
             port=5434,
@@ -194,6 +194,21 @@ def get_replica_config(read_only: bool = False) -> DatabaseConfig:
         connect_timeout=timeout,
         read_only=read_only,
     )
+
+
+def _connect_kwargs(cfg: DatabaseConfig) -> dict[str, object]:
+    """Construye argumentos seguros para psycopg.connect (tolerante a símbolos en passwords)."""
+    kwargs: dict[str, object] = {
+        "host": cfg.host,
+        "port": cfg.port,
+        "dbname": cfg.database,
+        "user": cfg.user,
+        "password": cfg.password,
+        "connect_timeout": cfg.connect_timeout,
+    }
+    if cfg.read_only:
+        kwargs["options"] = "-c default_transaction_read_only=on"
+    return kwargs
 
 
 @contextmanager
@@ -224,7 +239,7 @@ def get_readonly_connection(
         cfg = get_replica_config(read_only=True)
 
     try:
-        with psycopg.connect(cfg.conn_info, row_factory=dict_row) as conn:
+        with psycopg.connect(**_connect_kwargs(cfg), row_factory=dict_row) as conn:
             conn.read_only = True
             yield conn
     except psycopg.Error as err:
@@ -251,7 +266,7 @@ def get_readwrite_connection(
             read_only=False,
         )
     try:
-        with psycopg.connect(cfg.conn_info, row_factory=dict_row) as conn:
+        with psycopg.connect(**_connect_kwargs(cfg), row_factory=dict_row) as conn:
             yield conn
     except psycopg.Error as err:
         raise LegacySeederError(
