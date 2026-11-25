@@ -161,10 +161,10 @@ ALTER TABLE public.access_logs ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEF
 ALTER TABLE public.access_logs ADD COLUMN IF NOT EXISTS denial_reason TEXT;
 ALTER TABLE public.access_logs ADD COLUMN IF NOT EXISTS layer TEXT;
 
--- Otorgar permisos al rol operativo solo si ya existe (sin crear roles con contraseñas)
+-- Otorgar permisos al rol operativo solo si se ejecuta como rol distinto (ej. superusuario postgres)
 DO $$
 BEGIN
-    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'prospector_datos') THEN
+    IF current_user <> 'prospector_datos' AND EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'prospector_datos') THEN
         GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO prospector_datos;
         GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO prospector_datos;
     END IF;
