@@ -33,6 +33,21 @@ class AnalyticsQueryRequest(BaseModel):
         examples=[["institucion_id", "cartera_bruta", "ratio_mora"]],
         description="Columnas o métricas a proyectar en el resultado",
     )
+    search: str | None = Field(
+        default=None,
+        description="Filtro de texto libre insensible a mayúsculas aplicado en DuckDB sobre todo el conjunto",
+    )
+    limit: int | None = Field(
+        default=None,
+        ge=1,
+        le=5000,
+        description="Límite opcional de filas para paginación en servidor",
+    )
+    offset: int = Field(
+        default=0,
+        ge=0,
+        description="Desplazamiento opcional de filas para paginación en servidor",
+    )
 
 
 class AnalyticsQueryResponse(BaseModel):

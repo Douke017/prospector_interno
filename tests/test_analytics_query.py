@@ -162,3 +162,55 @@ def test_api_materialize_endpoint() -> None:
     assert "total_silver_records" in data
     assert "total_gold_records" in data
     assert "mart_path" in data
+
+
+def test_analytics_query_server_search_and_pagination(tmp_path: Path) -> None:
+    """Verifica búsqueda de texto libre insensible a mayúsculas y paginación en DuckDB."""
+    import duckdb
+    from prospector_interno.adapters.analytics.duckdb_analytics_adapter import (
+        DuckDBAnalyticsAdapter,
+    )
+    from prospector_interno.domain.contracts.analytics_spec import AnalyticsQueryRequest
+
+    part_dir = tmp_path / "catalogo_series_files" / "gestion=2025" / "mes=01"
+    part_dir.mkdir(parents=True, exist_ok=True)
+    pq_file = part_dir / "part_0.parquet"
+
+    con = duckdb.connect(":memory:")
+    con.execute(
+        f"""
+        COPY (
+            SELECT 'ADUANA' AS institucion_id, 'Aduana Nacional' AS institucion_nombre,
+                   'D_BO_000000012' AS codigo_serie, 'Boletin de recaudaciones' AS nombre_serie,
+                   'MANUAL_FILE' AS tipo_serie, '.xlsx' AS formato_archivo,
+                   'Mensual' AS frecuencia_publicacion, 'activo' AS estado_serie,
+                   '2025-01-31' AS actualizado_hasta, 'https://www.aduana.gob.bo/' AS url_principal,
+                   '/mnt/spim' AS ruta_servidor_spim, 12 AS total_descargas_bruto,
+                   4 AS total_reportes_derivados, 2025 AS gestion, 1 AS mes,
+                   '{"a" * 64}' AS source_file_sha256
+            UNION ALL
+            SELECT 'BCB', 'Banco Central', 'D_BO_000000484', 'Tasas diarias',
+                   'MANUAL_FILE', '.xlsx', 'Diaria', 'activo', '2025-01-30',
+                   'https://www.bcb.gob.bo/', '/mnt/spim', 30, 2, 2025, 1, '{"b" * 64}'
+            UNION ALL
+            SELECT 'INE', 'INE Bolivia', 'D_BO_000000016', 'IPC Mensual',
+                   'AUTOMATIZADO_DAG', '.xlsx', 'Mensual', 'activo', '2025-01-29',
+                   'https://www.ine.gob.bo/', '/mnt/spim', 25, 3, 2025, 1, '{"c" * 64}'
+        ) TO '{pq_file}' (FORMAT PARQUET, COMPRESSION ZSTD);
+        """
+    )
+    con.close()
+
+    adapter = DuckDBAnalyticsAdapter(base_gold_path=tmp_path)
+
+    res_search = adapter.execute_query(
+        AnalyticsQueryRequest(datamart="catalogo_series_files", search="d_bo_000000012")
+    )
+    assert res_search.total_records == 1
+    assert res_search.records[0]["codigo_serie"] == "D_BO_000000012"
+
+    res_page = adapter.execute_query(
+        AnalyticsQueryRequest(datamart="catalogo_series_files", limit=2, offset=1)
+    )
+    assert res_page.total_records == 3
+    assert len(res_page.records) == 2

@@ -594,17 +594,36 @@ class DuckDBAnalyticsAdapter:
             where_clauses.append(f"mes IN ({placeholders})")
             params.extend(int_meses)
 
+        search_term = (request.search or "").strip()
+        if search_term:
+            like_pattern = f"%{search_term}%"
+            search_parts = [f"CAST({col} AS VARCHAR) ILIKE ?" for col in selected_cols]
+            where_clauses.append(f"({' OR '.join(search_parts)})")
+            params.extend([like_pattern] * len(selected_cols))
+
         where_sql = " AND ".join(where_clauses)
+        count_sql = f"SELECT COUNT(*) FROM read_parquet('{glob_path}') WHERE {where_sql}"
+
+        page_clause = ""
+        query_params = list(params)
+        if request.limit is not None:
+            page_clause = " LIMIT ? OFFSET ?"
+            query_params.extend([int(request.limit), int(request.offset or 0)])
+
         sql = f"""
             SELECT {cols_sql}
             FROM read_parquet('{glob_path}')
             WHERE {where_sql}
             ORDER BY gestion DESC, mes DESC, institucion_id ASC
+            {page_clause}
         """
 
         con = self._connect()
         try:
-            cursor = con.execute(sql, params)
+            total_row = con.execute(count_sql, params).fetchone()
+            total_matching = int(total_row[0]) if total_row else 0
+
+            cursor = con.execute(sql, query_params)
             raw_cols = [c[0] for c in cursor.description]
             rows = cursor.fetchall()
 
@@ -627,7 +646,7 @@ class DuckDBAnalyticsAdapter:
 
         return AnalyticsQueryResponse(
             datamart=request.datamart,
-            total_records=len(records),
+            total_records=total_matching,
             execution_time_ms=duration_ms,
             columns=raw_cols,
             records=records,

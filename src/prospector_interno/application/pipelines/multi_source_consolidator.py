@@ -468,19 +468,6 @@ def _consolidate_from_postgres(
                             ref_sha,
                         )
                     )
-                # Asegurar cobertura completa de los 12 meses de 2025 para derivación trimestral/semestral/anual
-                existing_2025_months = {row[14] for row in rows_1 if row[13] == 2025}
-                if rows_1 and len(existing_2025_months) < 12:
-                    template_row = list(rows_1[0])
-                    for m_fill in range(1, 13):
-                        if m_fill not in existing_2025_months:
-                            clone = list(template_row)
-                            clone[2] = f"{clone[2]}_M{m_fill:02d}"
-                            clone[8] = f"2025-{m_fill:02d}-01"
-                            clone[13] = 2025
-                            clone[14] = m_fill
-                            rows_1.append(tuple(clone))
-
                 stats["catalogo_series_files"] = _write_partitioned_parquet_and_lineage(
                     base_gold_path=base_gold_path,
                     datamart_name="catalogo_series_files",
@@ -534,20 +521,21 @@ def _consolidate_from_postgres(
                     UNION ALL
                     (
                         SELECT
-                            s.name AS source_name,
+                            COALESCE(s.name, 'DATAX') AS source_name,
                             dr.id_dag_run AS id_descarga,
-                            f9.code AS codigo_serie,
-                            COALESCE(NULLIF(TRIM(dr.file_name), ''), f9.name) AS nombre_serie,
+                            COALESCE(NULLIF(TRIM(dr.id_dag), ''), f9.code, f.code, 'DAG_' || dr.id_dag_run::text) AS codigo_serie,
+                            COALESCE(NULLIF(TRIM(dr.file_name), ''), f9.name, f.name, '-') AS nombre_serie,
                             COALESCE(dr.execution_date::text, '2025-12-01') AS fecha_datos,
                             COALESCE(dr.execution_date::text, '2025-12-01') AS fecha_descarga,
                             COALESCE(NULLIF(TRIM(dr.state), ''), 'SUCCESS') AS estado_descarga,
-                            '.xlsx' AS formato_archivo,
-                            COALESCE(NULLIF(TRIM(dr.file_path), ''), NULLIF(TRIM(f9.path), ''), '-') AS ruta_archivo_bruto,
-                            COALESCE(NULLIF(TRIM(dr.file_url), ''), NULLIF(TRIM(f9.main_url), ''), '-') AS url_descarga,
+                            COALESCE(NULLIF(TRIM(f.type), ''), '.xlsx') AS formato_archivo,
+                            COALESCE(NULLIF(TRIM(dr.file_path), ''), NULLIF(TRIM(f9.path), ''), NULLIF(TRIM(f.path), ''), '-') AS ruta_archivo_bruto,
+                            COALESCE(NULLIF(TRIM(dr.file_url), ''), NULLIF(TRIM(f9.main_url), ''), NULLIF(TRIM(f.main_url), ''), '-') AS url_descarga,
                             dr.run_id AS raw_hash
                         FROM dag_run dr
-                        JOIN file9 f9 ON f9.id_file = dr.id_file
-                        JOIN source s ON s.id_source = f9.id_source
+                        LEFT JOIN file9 f9 ON f9.id_file = dr.id_file
+                        LEFT JOIN file f ON f.id_file = dr.id_file
+                        LEFT JOIN source s ON s.id_source = COALESCE(f9.id_source, f.id_source)
                         ORDER BY dr.id_dag_run DESC
                         LIMIT 600
                     );
