@@ -211,6 +211,28 @@ def _connect_kwargs(cfg: DatabaseConfig) -> dict[str, object]:
     return kwargs
 
 
+def get_readonly_catalog_config() -> DatabaseConfig:
+    """Retorna la configuración de solo lectura hacia el catálogo productivo.
+
+    Si `PROSPECTOR_RO_PG_HOST` está definido (arquitectura Dual-DB Zero-Mutation),
+    conecta estrictamente en modo `read_only=True` al PostgreSQL de producción
+    sin mutar jamás esa instancia; en caso contrario reutiliza `get_replica_config`.
+    """
+    is_pytest = "PYTEST_CURRENT_TEST" in os.environ and "FORCE_PROD_DB" not in os.environ
+    ro_host = os.environ.get("PROSPECTOR_RO_PG_HOST", "").strip()
+    if not is_pytest and ro_host:
+        return DatabaseConfig(
+            host=ro_host,
+            port=int(os.environ.get("PROSPECTOR_RO_PG_PORT", "5432")),
+            database=os.environ.get("PROSPECTOR_RO_PG_DB", "platform_db"),
+            user=os.environ.get("PROSPECTOR_RO_PG_USER", "postgres"),
+            password=os.environ.get("PROSPECTOR_RO_PG_PASSWORD", ""),
+            connect_timeout=int(os.environ.get("PROSPECTOR_PG_TIMEOUT", "5")),
+            read_only=True,
+        )
+    return get_replica_config(read_only=True)
+
+
 @contextmanager
 def get_readonly_connection(
     config: DatabaseConfig | None = None,
@@ -223,7 +245,8 @@ def get_readonly_connection(
 
     Args:
         config: Configuración de conexión opcional. Si es None, se obtiene
-            la configuración de réplica local (o .env si FORCE_PROD_DB=1).
+            la configuración de catálogo de solo lectura (PROSPECTOR_RO_PG_HOST
+            si está definida, o la réplica local).
 
     Yields:
         Conexión activa de psycopg configurada con row_factory=dict_row.
@@ -236,7 +259,7 @@ def get_readonly_connection(
     elif os.environ.get("FORCE_PROD_DB") == "1":
         cfg = get_database_config(force_prod=True)
     else:
-        cfg = get_replica_config(read_only=True)
+        cfg = get_readonly_catalog_config()
 
     try:
         with psycopg.connect(**_connect_kwargs(cfg), row_factory=dict_row) as conn:

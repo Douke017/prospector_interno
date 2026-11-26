@@ -18,6 +18,7 @@ from typing import Any
 import duckdb
 
 from prospector_interno.adapters.storage.db_connection import (
+    get_readonly_connection,
     get_readwrite_connection,
 )
 from prospector_interno.domain.contracts.lineage_spec import StorageLayer
@@ -388,6 +389,103 @@ def consolidate_multi_source_repositories(
         return stats
 
 
+def sync_inventory_from_readonly_prod() -> int:
+    """Sincroniza de forma idempotente y Zero-Mutation las URLs de file/file9 hacia url_inventory_map."""
+    import os
+
+    if not os.environ.get("PROSPECTOR_RO_PG_HOST", "").strip():
+        return 0
+
+    now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    rows_to_upsert: list[tuple[str, str, str, str, str, bool, str]] = []
+    seen_hashes: set[str] = set()
+
+    try:
+        with get_readonly_connection() as ro_conn:
+            with ro_conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        COALESCE(NULLIF(TRIM(s.short_name), ''), s.name) AS source_code,
+                        f.code AS file_code,
+                        f.name AS file_name,
+                        COALESCE(NULLIF(TRIM(f.specific_url), ''), NULLIF(TRIM(f.main_url), '')) AS target_url,
+                        EXISTS(SELECT 1 FROM download d WHERE d.id_file = f.id_file) AS has_dl
+                    FROM file f
+                    JOIN source s ON s.id_source = f.id_source
+                    WHERE COALESCE(NULLIF(TRIM(f.specific_url), ''), NULLIF(TRIM(f.main_url), '')) IS NOT NULL
+                    UNION ALL
+                    SELECT
+                        COALESCE(NULLIF(TRIM(s.short_name), ''), s.name) AS source_code,
+                        f9.code AS file_code,
+                        f9.name AS file_name,
+                        NULLIF(TRIM(f9.main_url), '') AS target_url,
+                        EXISTS(SELECT 1 FROM dag_run dr WHERE dr.id_file = f9.id_file) AS has_dl
+                    FROM file9 f9
+                    JOIN source s ON s.id_source = f9.id_source
+                    WHERE NULLIF(TRIM(f9.main_url), '') IS NOT NULL;
+                    """
+                )
+                for r in cur.fetchall():
+                    url = str(r.get("target_url") or "").strip()
+                    if not url or url.lower() in ("vacio", "no-data", "-"):
+                        continue
+                    norm_hash = hashlib.sha256(url.lower().rstrip("/").encode("utf-8")).hexdigest()
+                    if norm_hash in seen_hashes:
+                        continue
+                    seen_hashes.add(norm_hash)
+                    src_code = str(r.get("source_code") or "DATAX").strip().upper()
+                    file_code = str(r.get("file_code") or "").strip()
+                    file_name = str(r.get("file_name") or file_code or url).strip()
+                    has_dl = bool(r.get("has_dl"))
+                    rows_to_upsert.append(
+                        (
+                            src_code,
+                            file_code,
+                            file_name,
+                            url,
+                            norm_hash,
+                            has_dl,
+                            now_str,
+                        )
+                    )
+    except Exception:
+        return 0
+
+    if not rows_to_upsert:
+        return 0
+
+    try:
+        with get_readwrite_connection() as rw_conn:
+            with rw_conn.cursor() as cur:
+                cur.executemany(
+                    """
+                    INSERT INTO public.url_inventory_map (
+                        source_id, file_code, file_name, canonical_url,
+                        normalized_url_sha256, is_discovered_web, is_downloaded,
+                        is_processed, status, updated_at
+                    ) VALUES (
+                        %s, %s, %s, %s, %s, FALSE, %s, FALSE,
+                        CASE WHEN %s THEN 'DESCARGADO_BRONZE' ELSE 'CATALOGADO_BDD' END,
+                        %s
+                    )
+                    ON CONFLICT (normalized_url_sha256) DO UPDATE SET
+                        file_code = COALESCE(NULLIF(public.url_inventory_map.file_code, ''), EXCLUDED.file_code),
+                        file_name = COALESCE(NULLIF(public.url_inventory_map.file_name, ''), EXCLUDED.file_name),
+                        is_downloaded = public.url_inventory_map.is_downloaded OR EXCLUDED.is_downloaded,
+                        updated_at = EXCLUDED.updated_at;
+                    """,
+                    [
+                        (sc, fc, fn, u, nh, hd, hd, ts)
+                        for (sc, fc, fn, u, nh, hd, ts) in rows_to_upsert
+                    ],
+                )
+            rw_conn.commit()
+    except Exception:
+        return 0
+    return len(rows_to_upsert)
+
+
 def _consolidate_from_postgres(
     *,
     base_gold_path: Path,
@@ -398,7 +496,9 @@ def _consolidate_from_postgres(
     target: str | None,
 ) -> dict[str, dict[str, Any]]:
     stats: dict[str, dict[str, Any]] = {}
-    with get_readwrite_connection() as conn:
+    sync_inventory_from_readonly_prod()
+
+    with get_readonly_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT to_regclass('public.file') IS NOT NULL AS has_file;")
             has_legacy_row = cur.fetchone() or {}
@@ -769,9 +869,11 @@ def _consolidate_from_postgres(
                     reference_bronze_artifact=ref_art,
                 )
 
-            # 5. mapa_web_52_fuentes (url_inventory_map de las 52 fuentes)
-            if target in (None, "all", "mapa_web_52_fuentes"):
-                cur.execute(
+    # 5. mapa_web_52_fuentes (url_inventory_map en BDD operativa local)
+    if target in (None, "all", "mapa_web_52_fuentes"):
+        with get_readwrite_connection() as rw_conn:
+            with rw_conn.cursor() as rw_cur:
+                rw_cur.execute(
                     """
                     SELECT
                         UPPER(u.source_id) AS source_id,
@@ -791,7 +893,7 @@ def _consolidate_from_postgres(
                     """
                 )
                 rows_5 = []
-                for idx, r in enumerate(cur.fetchall()):
+                for idx, r in enumerate(rw_cur.fetchall()):
                     inst_id = str(r["source_id"] or "DATAX").strip().upper()
                     inst_name = str(r["source_name"] or inst_id).strip()
                     upd_en = str(r["actualizado_en"] or "2025-12-01")[:19]
