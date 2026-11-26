@@ -214,3 +214,66 @@ def test_analytics_query_server_search_and_pagination(tmp_path: Path) -> None:
     )
     assert res_page.total_records == 3
     assert len(res_page.records) == 2
+
+
+def test_analytics_search_spim_code_in_robots_and_datasets(tmp_path) -> None:
+    """Verifica búsqueda por código SPIM (ej. S_BOBBV_44_000580) en Robots y Datasets SPIM."""
+    import duckdb
+    from prospector_interno.adapters.analytics.duckdb_analytics_adapter import (
+        DuckDBAnalyticsAdapter,
+    )
+    from prospector_interno.domain.contracts.analytics_spec import AnalyticsQueryRequest
+
+    robots_dir = tmp_path / "catalogo_series_files" / "gestion=2025" / "mes=12"
+    robots_dir.mkdir(parents=True, exist_ok=True)
+    spim_dir = tmp_path / "bases_datos_cubos" / "gestion=2025" / "mes=12"
+    spim_dir.mkdir(parents=True, exist_ok=True)
+
+    con = duckdb.connect(":memory:")
+    con.execute(
+        f"""
+        COPY (
+            SELECT 'BBV' AS institucion_id, 'Bolsa Boliviana de Valores' AS institucion_nombre,
+                   'D_BO_000000417' AS codigo_serie, 'S_BOBBV_44_000580' AS codigos_spim,
+                   'Inversionistas Institucionales' AS nombre_serie,
+                   'MANUAL_FILE' AS tipo_serie, '.pdf' AS formato_archivo,
+                   'Mensual' AS frecuencia_publicacion, 'Actualizado' AS estado_serie,
+                   '2026-03-31' AS actualizado_hasta, 'https://www2.bbv.com.bo/' AS url_principal,
+                   '/mnt/spim' AS ruta_servidor_spim, 10 AS total_descargas_bruto,
+                   1 AS total_reportes_derivados, 2025 AS gestion, 12 AS mes,
+                   '{"a" * 64}' AS source_file_sha256
+        ) TO '{robots_dir / "part_0.parquet"}' (FORMAT PARQUET, COMPRESSION ZSTD);
+        """
+    )
+    con.execute(
+        f"""
+        COPY (
+            SELECT 'BBV' AS institucion_id, 'BBV' AS institucion_nombre,
+                   'S_BOBBV_44_000580' AS codigo_base,
+                   'OLD166 Valores Inscritos en Bolsa por Emisor' AS nombre_base,
+                   'Diario' AS frecuencia_datos, 'Mensual' AS frecuencia_actualizacion,
+                   '-' AS datos_desde, '2024-06-30' AS actualizado_hasta,
+                   '-' AS proxima_actualizacion, 'ACTUALIZADO' AS estado_cubo,
+                   'D_BO_000000417_01' AS reportes_insumo, 86 AS total_actualizaciones,
+                   'https://www2.bbv.com.bo/invers.pdf' AS ultima_url_origen,
+                   2025 AS gestion, 12 AS mes, '{"b" * 64}' AS source_file_sha256
+        ) TO '{spim_dir / "part_0.parquet"}' (FORMAT PARQUET, COMPRESSION ZSTD);
+        """
+    )
+    con.close()
+
+    adapter = DuckDBAnalyticsAdapter(base_gold_path=tmp_path)
+
+    res_robot = adapter.execute_query(
+        AnalyticsQueryRequest(datamart="catalogo_series_files", search="S_BOBBV_44_000580")
+    )
+    assert res_robot.total_records == 1
+    assert res_robot.records[0]["codigo_serie"] == "D_BO_000000417"
+    assert res_robot.records[0]["codigos_spim"] == "S_BOBBV_44_000580"
+
+    res_spim = adapter.execute_query(
+        AnalyticsQueryRequest(datamart="bases_datos_cubos", search="s_bobbv_44_000580")
+    )
+    assert res_spim.total_records == 1
+    assert res_spim.records[0]["codigo_base"] == "S_BOBBV_44_000580"
+    assert res_spim.records[0]["institucion_nombre"] == "BBV"

@@ -75,7 +75,8 @@ MULTI_SOURCE_DICTIONARY: list[dict[str, Any]] = [
     {"datamart_name": "catalogo_series_files", "column_name": "institucion_id", "business_label": "Código Fuente", "data_type": "VARCHAR", "unit": None, "formula": "source.short_name", "description": "Identificador estandarizado de la institución o portal emisor.", "is_primary_metric": False, "display_order": 1},
     {"datamart_name": "catalogo_series_files", "column_name": "institucion_nombre", "business_label": "Entidad Emisora", "data_type": "VARCHAR", "unit": None, "formula": "source.name", "description": "Denominación oficial de la fuente registrada en el servidor.", "is_primary_metric": False, "display_order": 2},
     {"datamart_name": "catalogo_series_files", "column_name": "codigo_serie", "business_label": "Código de Serie (D_BO_* / A_*)", "data_type": "VARCHAR", "unit": None, "formula": "file.code / file9.code", "description": "Código único de la serie de archivos fuente monitoreada.", "is_primary_metric": True, "display_order": 3},
-    {"datamart_name": "catalogo_series_files", "column_name": "nombre_serie", "business_label": "Denominación del Archivo Fuente", "data_type": "VARCHAR", "unit": None, "formula": "file.name / file9.name", "description": "Nombre técnico del archivo o boletín publicado por la entidad.", "is_primary_metric": False, "display_order": 4},
+    {"datamart_name": "catalogo_series_files", "column_name": "codigos_spim", "business_label": "Código SPIM Asociado", "data_type": "VARCHAR", "unit": None, "formula": "STRING_AGG(data_base_report.db_code)", "description": "Código(s) SPIM de dataset o cubo (S_* / DB_*) alimentados por este robot.", "is_primary_metric": True, "display_order": 4},
+    {"datamart_name": "catalogo_series_files", "column_name": "nombre_serie", "business_label": "Denominación del Archivo Fuente", "data_type": "VARCHAR", "unit": None, "formula": "file.name / file9.name", "description": "Nombre técnico del archivo o boletín publicado por la entidad.", "is_primary_metric": False, "display_order": 5},
     {"datamart_name": "catalogo_series_files", "column_name": "tipo_serie", "business_label": "Modalidad de Ingesta", "data_type": "VARCHAR", "unit": None, "formula": "MANUAL_FILE | AUTOMATIZADO_DAG", "description": "Distingue series del catálogo file (D_BO_*) y flujos Airflow file9 (A_*).", "is_primary_metric": False, "display_order": 5},
     {"datamart_name": "catalogo_series_files", "column_name": "formato_archivo", "business_label": "Formato de Archivo", "data_type": "VARCHAR", "unit": None, "formula": "file.type", "description": "Extensión física del archivo fuente (.xlsx, .xls, .pdf, .csv, .zip).", "is_primary_metric": False, "display_order": 6},
     {"datamart_name": "catalogo_series_files", "column_name": "frecuencia_publicacion", "business_label": "Periodicidad de Publicación", "data_type": "VARCHAR", "unit": None, "formula": "file.publication_frequency", "description": "Frecuencia con que la fuente publica nuevos cortes (Diaria, Mensual, Anual).", "is_primary_metric": False, "display_order": 7},
@@ -508,13 +509,78 @@ def _consolidate_from_postgres(
             has_legacy_row = cur.fetchone() or {}
             has_legacy_tables = bool(has_legacy_row.get("has_file"))
 
-            # 1. catalogo_series_files (file + file9 de todas las fuentes)
+            # 1. catalogo_series_files (file + file9 de todas las fuentes con cruce SPIM)
             if has_legacy_tables and target in (None, "all", "catalogo_series_files"):
                 cur.execute(
                     """
                     SELECT
+                        to_regclass('public.data_base_report') IS NOT NULL AS has_dbr,
+                        to_regclass('public.alerts') IS NOT NULL AS has_alerts;
+                    """
+                )
+                aux_row = cur.fetchone() or {}
+                has_dbr = bool(aux_row.get("has_dbr"))
+                has_alerts = bool(aux_row.get("has_alerts"))
+
+                spim_union_parts: list[str] = []
+                if has_dbr:
+                    spim_union_parts.append(
+                        """
+                        SELECT UPPER(TRIM(f.code)) AS file_code,
+                               TRIM(REGEXP_REPLACE(dbr.db_code, E'[\\r\\n]+', '', 'g')) AS spim_code
+                        FROM report r
+                        JOIN file f ON f.id_file = r.id_file
+                        JOIN data_base_report dbr ON dbr.report_code = r.code
+                        WHERE dbr.db_code IS NOT NULL AND TRIM(dbr.db_code) <> ''
+                        """
+                    )
+                    spim_union_parts.append(
+                        """
+                        SELECT UPPER(TRIM(REGEXP_REPLACE(dbr.report_code, '_[0-9]+$', ''))) AS file_code,
+                               TRIM(REGEXP_REPLACE(dbr.db_code, E'[\\r\\n]+', '', 'g')) AS spim_code
+                        FROM data_base_report dbr
+                        WHERE dbr.db_code IS NOT NULL AND TRIM(dbr.db_code) <> ''
+                          AND dbr.report_code IS NOT NULL AND TRIM(dbr.report_code) <> ''
+                        """
+                    )
+                if has_alerts:
+                    spim_union_parts.append(
+                        """
+                        SELECT UPPER(TRIM(a.file_code)) AS file_code,
+                               TRIM(REGEXP_REPLACE(a.db_code, E'[\\r\\n]+', '', 'g')) AS spim_code
+                        FROM alerts a
+                        WHERE a.file_code IS NOT NULL AND TRIM(a.file_code) <> ''
+                          AND a.db_code IS NOT NULL AND TRIM(a.db_code) <> ''
+                        """
+                    )
+
+                if spim_union_parts:
+                    spim_cte = f"""
+                        WITH spim_links AS (
+                            {' UNION '.join(spim_union_parts)}
+                        ),
+                        spim_agg AS (
+                            SELECT file_code,
+                                   STRING_AGG(DISTINCT spim_code, ', ' ORDER BY spim_code) AS codigos_spim
+                            FROM spim_links
+                            WHERE spim_code <> ''
+                            GROUP BY file_code
+                        )
+                    """
+                else:
+                    spim_cte = """
+                        WITH spim_agg AS (
+                            SELECT NULL::text AS file_code, NULL::text AS codigos_spim WHERE FALSE
+                        )
+                    """
+
+                cur.execute(
+                    f"""
+                    {spim_cte}
+                    SELECT
                         s.name AS source_name,
                         f.code AS codigo_serie,
+                        COALESCE(sa.codigos_spim, '-') AS codigos_spim,
                         f.name AS nombre_serie,
                         'MANUAL_FILE' AS tipo_serie,
                         COALESCE(NULLIF(TRIM(f.type), ''), '.xlsx') AS formato_archivo,
@@ -527,10 +593,12 @@ def _consolidate_from_postgres(
                         (SELECT COUNT(*) FROM report r WHERE r.id_file = f.id_file) AS total_rep
                     FROM file f
                     JOIN source s ON s.id_source = f.id_source
+                    LEFT JOIN spim_agg sa ON sa.file_code = UPPER(TRIM(f.code))
                     UNION ALL
                     SELECT
                         s.name AS source_name,
                         f9.code AS codigo_serie,
+                        COALESCE(sa.codigos_spim, '-') AS codigos_spim,
                         f9.name AS nombre_serie,
                         'AUTOMATIZADO_DAG' AS tipo_serie,
                         '.xlsx' AS formato_archivo,
@@ -543,6 +611,7 @@ def _consolidate_from_postgres(
                         0 AS total_rep
                     FROM file9 f9
                     JOIN source s ON s.id_source = f9.id_source
+                    LEFT JOIN spim_agg sa ON sa.file_code = UPPER(TRIM(f9.code))
                     ORDER BY total_dl DESC, codigo_serie ASC;
                     """
                 )
@@ -557,6 +626,7 @@ def _consolidate_from_postgres(
                             inst_id,
                             inst_name,
                             str(r["codigo_serie"] or "-"),
+                            str(r["codigos_spim"] or "-"),
                             str(r["nombre_serie"] or "-"),
                             str(r["tipo_serie"]),
                             str(r["formato_archivo"] or ".xlsx"),
@@ -579,6 +649,7 @@ def _consolidate_from_postgres(
                         ("institucion_id", "VARCHAR"),
                         ("institucion_nombre", "VARCHAR"),
                         ("codigo_serie", "VARCHAR"),
+                        ("codigos_spim", "VARCHAR"),
                         ("nombre_serie", "VARCHAR"),
                         ("tipo_serie", "VARCHAR"),
                         ("formato_archivo", "VARCHAR"),
@@ -788,43 +859,88 @@ def _consolidate_from_postgres(
                     reference_bronze_artifact=ref_art,
                 )
 
-            # 4. bases_datos_cubos (694 data_base + cubo + actualizacion + data_base_report)
+            # 4. bases_datos_cubos (data_base + cubos SPIM completos + actualizacion + data_base_report)
             if has_legacy_tables and target in (None, "all", "bases_datos_cubos"):
                 cur.execute(
                     """
-                    SELECT
-                        COALESCE(NULLIF(TRIM(db.acronym), ''), NULLIF(TRIM(db.source), ''), 'DATAX') AS src_code,
-                        COALESCE(NULLIF(TRIM(db.source), ''), NULLIF(TRIM(db.acronym), ''), 'DATAX') AS src_name,
-                        db.db_code AS codigo_base,
-                        db.name AS nombre_base,
-                        COALESCE(NULLIF(TRIM(db.data_frequency), ''), 'Mensual') AS frecuencia_datos,
-                        COALESCE(NULLIF(TRIM(db.update_frequenc), ''), 'Mensual') AS frecuencia_act,
-                        COALESCE(db.data_since::text, '-') AS datos_desde,
-                        COALESCE(db.updated_to::text, '2025-12-01') AS actualizado_hasta,
-                        COALESCE(db.next_update_date::text, '-') AS proxima_actualizacion,
-                        COALESCE(c.estado, 'OPERATIVO') AS estado_cubo,
-                        COALESCE(
-                            (SELECT STRING_AGG(DISTINCT dbr.report_code, ', ') FROM data_base_report dbr WHERE dbr.db_code = db.db_code),
-                            'Directo Cubo SPIM'
-                        ) AS reportes_insumo,
-                        COALESCE(
-                            (SELECT COUNT(*) FROM actualizacion a WHERE a.idcubo = c.idcubo),
-                            1
-                        ) AS total_actualizaciones,
-                        COALESCE(
-                            (SELECT a.web FROM actualizacion a WHERE a.idcubo = c.idcubo AND a.web IS NOT NULL AND a.web <> '' ORDER BY a.idactualizacion DESC LIMIT 1),
-                            '-'
-                        ) AS ultima_url
-                    FROM data_base db
-                    LEFT JOIN cubo c ON c.codigospim = db.db_code
-                    ORDER BY total_actualizaciones DESC, db.db_code ASC;
+                    WITH cubo_clean AS (
+                        SELECT DISTINCT ON (TRIM(REGEXP_REPLACE(codigospim, E'[\\r\\n]+', '', 'g')))
+                            idcubo,
+                            TRIM(REGEXP_REPLACE(codigospim, E'[\\r\\n]+', '', 'g')) AS codigospim,
+                            NULLIF(TRIM(fuente), '') AS fuente,
+                            NULLIF(TRIM(frecuenciadatos), '') AS frecuenciadatos,
+                            NULLIF(TRIM(estado), '') AS estado
+                        FROM cubo
+                        WHERE codigospim IS NOT NULL
+                          AND TRIM(REGEXP_REPLACE(codigospim, E'[\\r\\n]+', '', 'g')) <> ''
+                        ORDER BY TRIM(REGEXP_REPLACE(codigospim, E'[\\r\\n]+', '', 'g')), idcubo DESC
+                    ),
+                    act_agg AS (
+                        SELECT idcubo,
+                               COUNT(*) AS total_act,
+                               MAX(datosa) AS max_datosa,
+                               (ARRAY_AGG(web ORDER BY idactualizacion DESC)
+                                   FILTER (WHERE web IS NOT NULL AND TRIM(web) <> ''))[1] AS ultima_web
+                        FROM actualizacion
+                        GROUP BY idcubo
+                    ),
+                    rep_agg AS (
+                        SELECT TRIM(REGEXP_REPLACE(db_code, E'[\\r\\n]+', '', 'g')) AS db_code,
+                               STRING_AGG(DISTINCT report_code, ', ' ORDER BY report_code) AS reportes_insumo
+                        FROM data_base_report
+                        WHERE db_code IS NOT NULL AND TRIM(db_code) <> ''
+                        GROUP BY TRIM(REGEXP_REPLACE(db_code, E'[\\r\\n]+', '', 'g'))
+                    )
+                    SELECT * FROM (
+                        SELECT
+                            COALESCE(NULLIF(TRIM(db.acronym), ''), c.fuente, NULLIF(TRIM(db.source), ''), 'DATAX') AS src_code,
+                            COALESCE(NULLIF(TRIM(db.source), ''), c.fuente, NULLIF(TRIM(db.acronym), ''), 'DATAX') AS src_name,
+                            TRIM(REGEXP_REPLACE(db.db_code, E'[\\r\\n]+', '', 'g')) AS codigo_base,
+                            COALESCE(NULLIF(TRIM(db.name), ''), TRIM(REGEXP_REPLACE(db.db_code, E'[\\r\\n]+', '', 'g'))) AS nombre_base,
+                            COALESCE(NULLIF(TRIM(db.data_frequency), ''), c.frecuenciadatos, 'Mensual') AS frecuencia_datos,
+                            COALESCE(NULLIF(TRIM(db.update_frequenc), ''), c.frecuenciadatos, 'Mensual') AS frecuencia_act,
+                            COALESCE(NULLIF(TRIM(db.data_since::text), ''), '-') AS datos_desde,
+                            COALESCE(NULLIF(TRIM(db.updated_to::text), ''), aa.max_datosa::text, '-') AS actualizado_hasta,
+                            COALESCE(NULLIF(TRIM(db.next_update_date::text), ''), '-') AS proxima_actualizacion,
+                            COALESCE(c.estado, 'OPERATIVO') AS estado_cubo,
+                            COALESCE(ra.reportes_insumo, '-') AS reportes_insumo,
+                            COALESCE(aa.total_act, 0) AS total_actualizaciones,
+                            COALESCE(aa.ultima_web, '-') AS ultima_url
+                        FROM data_base db
+                        LEFT JOIN cubo_clean c ON c.codigospim = TRIM(REGEXP_REPLACE(db.db_code, E'[\\r\\n]+', '', 'g'))
+                        LEFT JOIN act_agg aa ON aa.idcubo = c.idcubo
+                        LEFT JOIN rep_agg ra ON ra.db_code = TRIM(REGEXP_REPLACE(db.db_code, E'[\\r\\n]+', '', 'g'))
+                        WHERE db.db_code IS NOT NULL AND TRIM(db.db_code) <> ''
+                        UNION ALL
+                        SELECT
+                            COALESCE(c.fuente, 'DATAX') AS src_code,
+                            COALESCE(c.fuente, 'DATAX') AS src_name,
+                            c.codigospim AS codigo_base,
+                            c.codigospim AS nombre_base,
+                            COALESCE(c.frecuenciadatos, 'Mensual') AS frecuencia_datos,
+                            COALESCE(c.frecuenciadatos, 'Mensual') AS frecuencia_act,
+                            '-' AS datos_desde,
+                            COALESCE(aa.max_datosa::text, '-') AS actualizado_hasta,
+                            '-' AS proxima_actualizacion,
+                            COALESCE(c.estado, 'OPERATIVO') AS estado_cubo,
+                            COALESCE(ra.reportes_insumo, '-') AS reportes_insumo,
+                            COALESCE(aa.total_act, 0) AS total_actualizaciones,
+                            COALESCE(aa.ultima_web, '-') AS ultima_url
+                        FROM cubo_clean c
+                        LEFT JOIN data_base db
+                            ON TRIM(REGEXP_REPLACE(db.db_code, E'[\\r\\n]+', '', 'g')) = c.codigospim
+                        LEFT JOIN act_agg aa ON aa.idcubo = c.idcubo
+                        LEFT JOIN rep_agg ra ON ra.db_code = c.codigospim
+                        WHERE db.db_code IS NULL
+                    ) combined
+                    ORDER BY total_actualizaciones DESC, codigo_base ASC;
                     """
                 )
                 rows_4 = []
                 for r in cur.fetchall():
                     inst_id = _clean_source_code(r["src_code"])
                     inst_name = str(r["src_name"] or inst_id).strip()
-                    upd_to = str(r["actualizado_hasta"] or "2025-12-01")[:10]
+                    upd_to = str(r["actualizado_hasta"] or "-")[:10]
                     g, m = _parse_ym(upd_to, 2025, 12)
                     rows_4.append(
                         (
@@ -838,8 +954,8 @@ def _consolidate_from_postgres(
                             upd_to,
                             str(r["proxima_actualizacion"] or "-")[:10],
                             str(r["estado_cubo"] or "OPERATIVO"),
-                            str(r["reportes_insumo"] or "Directo Cubo SPIM"),
-                            int(r["total_actualizaciones"] or 1),
+                            str(r["reportes_insumo"] or "-"),
+                            int(r["total_actualizaciones"] or 0),
                             str(r["ultima_url"] or "-"),
                             g,
                             m,

@@ -29,6 +29,7 @@ PRIMARY_DATAMART_CATALOG: dict[str, dict[str, Any]] = {
             "institucion_id",
             "institucion_nombre",
             "codigo_serie",
+            "codigos_spim",
             "nombre_serie",
             "tipo_serie",
             "formato_archivo",
@@ -43,6 +44,7 @@ PRIMARY_DATAMART_CATALOG: dict[str, dict[str, Any]] = {
             "institucion_id",
             "institucion_nombre",
             "codigo_serie",
+            "codigos_spim",
             "nombre_serie",
             "tipo_serie",
             "formato_archivo",
@@ -570,56 +572,66 @@ class DuckDBAnalyticsAdapter:
         if not selected_cols:
             selected_cols = default_cols
 
-        cols_sql = ", ".join(selected_cols)
-
-        where_clauses = ["1=1"]
-        params: list[Any] = []
-
-        if request.institutions:
-            upper_insts = [str(i).strip().upper() for i in request.institutions if str(i).strip()]
-            if upper_insts:
-                placeholders = ", ".join(["?"] * len(upper_insts))
-                where_clauses.append(f"UPPER(institucion_id) IN ({placeholders})")
-                params.extend(upper_insts)
-
-        if request.gestiones:
-            int_gestiones = [int(g) for g in request.gestiones]
-            placeholders = ", ".join(["?"] * len(int_gestiones))
-            where_clauses.append(f"gestion IN ({placeholders})")
-            params.extend(int_gestiones)
-
-        if request.meses:
-            int_meses = [int(m) for m in request.meses]
-            placeholders = ", ".join(["?"] * len(int_meses))
-            where_clauses.append(f"mes IN ({placeholders})")
-            params.extend(int_meses)
-
-        search_term = (request.search or "").strip()
-        if search_term:
-            like_pattern = f"%{search_term}%"
-            search_parts = [f"CAST({col} AS VARCHAR) ILIKE ?" for col in selected_cols]
-            where_clauses.append(f"({' OR '.join(search_parts)})")
-            params.extend([like_pattern] * len(selected_cols))
-
-        where_sql = " AND ".join(where_clauses)
-        count_sql = f"SELECT COUNT(*) FROM read_parquet('{glob_path}') WHERE {where_sql}"
-
-        page_clause = ""
-        query_params = list(params)
-        if request.limit is not None:
-            page_clause = " LIMIT ? OFFSET ?"
-            query_params.extend([int(request.limit), int(request.offset or 0)])
-
-        sql = f"""
-            SELECT {cols_sql}
-            FROM read_parquet('{glob_path}')
-            WHERE {where_sql}
-            ORDER BY gestion DESC, mes DESC, institucion_id ASC
-            {page_clause}
-        """
-
         con = self._connect()
         try:
+            schema_rows = con.execute(
+                f"DESCRIBE SELECT * FROM read_parquet('{glob_path}')"
+            ).fetchall()
+            available_in_parquet = {str(r[0]).lower() for r in schema_rows}
+            selected_cols = [
+                c for c in selected_cols if c.lower() in available_in_parquet
+            ]
+            if not selected_cols:
+                selected_cols = [str(r[0]) for r in schema_rows]
+
+            cols_sql = ", ".join(selected_cols)
+
+            where_clauses = ["1=1"]
+            params: list[Any] = []
+
+            if request.institutions:
+                upper_insts = [str(i).strip().upper() for i in request.institutions if str(i).strip()]
+                if upper_insts:
+                    placeholders = ", ".join(["?"] * len(upper_insts))
+                    where_clauses.append(f"UPPER(institucion_id) IN ({placeholders})")
+                    params.extend(upper_insts)
+
+            if request.gestiones:
+                int_gestiones = [int(g) for g in request.gestiones]
+                placeholders = ", ".join(["?"] * len(int_gestiones))
+                where_clauses.append(f"gestion IN ({placeholders})")
+                params.extend(int_gestiones)
+
+            if request.meses:
+                int_meses = [int(m) for m in request.meses]
+                placeholders = ", ".join(["?"] * len(int_meses))
+                where_clauses.append(f"mes IN ({placeholders})")
+                params.extend(int_meses)
+
+            search_term = (request.search or "").strip()
+            if search_term:
+                like_pattern = f"%{search_term}%"
+                search_parts = [f"CAST({col} AS VARCHAR) ILIKE ?" for col in selected_cols]
+                where_clauses.append(f"({' OR '.join(search_parts)})")
+                params.extend([like_pattern] * len(selected_cols))
+
+            where_sql = " AND ".join(where_clauses)
+            count_sql = f"SELECT COUNT(*) FROM read_parquet('{glob_path}') WHERE {where_sql}"
+
+            page_clause = ""
+            query_params = list(params)
+            if request.limit is not None:
+                page_clause = " LIMIT ? OFFSET ?"
+                query_params.extend([int(request.limit), int(request.offset or 0)])
+
+            sql = f"""
+                SELECT {cols_sql}
+                FROM read_parquet('{glob_path}')
+                WHERE {where_sql}
+                ORDER BY gestion DESC, mes DESC, institucion_id ASC
+                {page_clause}
+            """
+
             total_row = con.execute(count_sql, params).fetchone()
             total_matching = int(total_row[0]) if total_row else 0
 
