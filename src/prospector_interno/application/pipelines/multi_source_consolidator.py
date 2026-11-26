@@ -11,11 +11,16 @@ Materializa directamente desde las tablas reales de `platform_db` (PostgreSQL):
 from __future__ import annotations
 
 from collections import defaultdict
+from datetime import datetime, timezone
 import hashlib
+import logging
+import os
 from pathlib import Path
 import re
 from typing import Any
 import duckdb
+
+logger = logging.getLogger(__name__)
 
 from prospector_interno.adapters.storage.db_connection import (
     get_readonly_connection,
@@ -385,14 +390,13 @@ def consolidate_multi_source_repositories(
             ref_sha=ref_sha,
             target=target,
         )
-    except Exception:
+    except Exception as exc:
+        logger.warning("Fallo consolidando repositorios desde PostgreSQL: %s", exc)
         return stats
 
 
 def sync_inventory_from_readonly_prod() -> int:
     """Sincroniza de forma idempotente y Zero-Mutation las URLs de file/file9 hacia url_inventory_map."""
-    import os
-
     if not os.environ.get("PROSPECTOR_RO_PG_HOST", "").strip():
         return 0
 
